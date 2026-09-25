@@ -47,6 +47,17 @@ export interface RequestItem {
   photos: Array<{ id: string; available: boolean }>;
   can_resolve: boolean;
   can_complain: boolean;
+  timeline: Array<{ type: string; at: string; label: string; future: boolean; demo: boolean }>;
+}
+
+export interface AppNotification {
+  id: string;
+  kind: 'status' | 'neighbors';
+  at: string;
+  title: string;
+  text: string;
+  request_id: string | null;
+  category: string | null;
 }
 
 export type AuthProblem = 'no_launch_data' | 'expired' | 'rejected';
@@ -254,6 +265,7 @@ export const api = {
   uploadPhoto,
   resolve: resolveRequest,
   catalog: () => get<Catalog>('/api/catalog'),
+  notifications: () => get<{ items: AppNotification[] }>('/api/notifications'),
   complaint: (id: string) => get<{ text: string; where: string; note: string }>(`/api/requests/${encodeURIComponent(id)}/complaint`),
   suggest: async (description: string) => {
     const res = await postJson('/api/requests/suggest', { description });

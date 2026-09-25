@@ -4,6 +4,7 @@ import { api, type RequestItem } from '../api';
 import { dateTime } from '../format';
 import { Field, orgName, StatusPill } from '../ui';
 import { Photos } from './Photos';
+import { Countdown, Timeline } from '../components';
 
 /** Отзыв — в два шага: случайное нажатие не должно закрыть заявку. */
 function CancelBlock({ onCancel }: { onCancel: () => Promise<string | null> }) {
@@ -147,12 +148,12 @@ export function RequestDetails({
       <Photos requestId={r.id} photos={r.photos} canAdd={r.can_cancel} max={maxPhotos} onChanged={onChanged} />
 
       <section className="card">
-        <Field label={open ? (r.overdue ? 'Срок истёк' : 'Срок по нормативу') : 'Срок был'} negative={open && r.overdue}>
-          до {dateTime(r.due_at)} (МСК)
-        </Field>
+        <Countdown r={r} />
         {r.norm && <Field label="Что должно произойти">{r.norm.what}</Field>}
         {r.norm && <Field label="Основание">{r.norm.ref}</Field>}
       </section>
+
+      <Timeline r={r} />
 
       {r.can_resolve && (
         <div className="gutter">

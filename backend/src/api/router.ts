@@ -8,6 +8,7 @@ import { formatAddress } from '../domain/address.js';
 import { complaintText } from '../domain/complaint.js';
 import { MAX_PHOTOS } from '../domain/photos.js';
 import { CATEGORY_ORDER, NORMS } from '../domain/norms.js';
+import { buildNotifications, requestTimeline, TIMELINE_LABEL } from '../domain/timeline.js';
 import { MAX_DESCRIPTION, MIN_DESCRIPTION, submitRequest, suggestCategory } from '../requests/service.js';
 import { effectiveStatus, OPEN_STATUSES, STATUS_LABEL } from '../domain/requestStatus.js';
 import { CONTENT_TYPES, MAX_PHOTO_BYTES, sniffImage, type PhotoStorage } from '../photos/storage.js';
@@ -104,6 +105,13 @@ function requestView(r: RequestInfo, now: Date, demo: boolean) {
     address: r.address,
     // Только id и наличие файла: ссылки и токены MAX клиенту не отдаём
     photos: r.photos.map((p) => ({ id: p.id, available: !!p.file })),
+    timeline: requestTimeline(r, now, demo).map((e) => ({
+      type: e.type,
+      at: e.at.toISOString(),
+      label: TIMELINE_LABEL[e.type],
+      future: !!e.future,
+      demo: !!e.demo,
+    })),
   };
 }
 
@@ -202,6 +210,27 @@ export function createApiRouter(deps: ApiDeps) {
       return;
     }
     res.json(requestView(r, clock(), !!deps.demoStatuses));
+  });
+
+  // Уведомления: новые статусы своих заявок и «Соседи уже сообщили» (заявки из того же дома за неделю)
+  router.get('/notifications', auth, async (_req, res: Response<unknown, Locals>) => {
+    const now = clock();
+    const [own, neighbors] = await Promise.all([
+      deps.store.listRequests(res.locals.userId, 50),
+      deps.store.houseActivity(res.locals.userId, new Date(now.getTime() - 7 * 86_400_000)),
+    ]);
+    const items = buildNotifications(own, neighbors, now, !!deps.demoStatuses);
+    res.json({
+      items: items.map((n) => ({
+        id: n.id,
+        kind: n.kind,
+        at: n.at.toISOString(),
+        title: n.title,
+        text: n.text,
+        request_id: n.requestId ?? null,
+        category: n.category ?? null,
+      })),
+    });
   });
 
   // ── подача заявки из мини-приложения ────────────────────────────────────

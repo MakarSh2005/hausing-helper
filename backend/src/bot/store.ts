@@ -67,6 +67,8 @@ export interface RequestInfo {
   createdAt: Date;
   dueAt: Date;
   reminderSentAt: Date | null;
+  /** Время последнего изменения: для закрытых заявок — когда закрыли. */
+  updatedAt: Date;
   org: OrgInfo | null;
   /** Адрес на момент подачи: «ул. Баумана, д. 15, кв. 42, подъезд 2». */
   address: string;
@@ -126,6 +128,11 @@ export interface BotStore {
    * Возвращает id вложения — под ним затем сохраняется файл.
    */
   addPhoto(maxUserId: string, requestId: string): Promise<{ ok: true; id: string } | { ok: false; reason: 'not_found' | 'closed' | 'limit' }>;
+  /**
+   * Заявки соседей по дому жильца за период — только категория и время, без текста и квартиры
+   * (для «Соседи уже сообщили»). Свои заявки не включаются.
+   */
+  houseActivity(maxUserId: string, since: Date): Promise<Array<{ category: RequestCategory; createdAt: Date }>>;
   /** chat_id диалога с пользователем — чтобы бот мог написать первым. */
   getChatId(maxUserId: string): Promise<string | null>;
 }
@@ -154,7 +161,7 @@ type HouseRow = {
 
 type RequestRow = {
   id: string; number: string; category: string; description: string; status: string;
-  createdAt: Date; dueAt: Date; reminderSentAt: Date | null;
+  createdAt: Date; dueAt: Date; reminderSentAt: Date | null; updatedAt: Date;
   address: string | null;
   organization: OrgRow | null;
   house: HouseRow;
@@ -174,7 +181,7 @@ function toOrg(o: OrgRow): OrgInfo {
 function toRequest(r: RequestRow): RequestInfo {
   return {
     id: r.id, number: r.number, category: r.category as RequestCategory, description: r.description,
-    status: r.status as RequestStatus, createdAt: r.createdAt, dueAt: r.dueAt, reminderSentAt: r.reminderSentAt,
+    status: r.status as RequestStatus, createdAt: r.createdAt, dueAt: r.dueAt, reminderSentAt: r.reminderSentAt, updatedAt: r.updatedAt,
     org: r.organization ? toOrg(r.organization) : null,
     house: toHouse(r.house),
     photos: r.attachments.filter((a) => a.type === 'image').map((a) => decodeRef(a.id, a.ref)),
@@ -347,6 +354,18 @@ export function createPrismaStore(db: Db, opts: { cacheMs?: number } = {}): BotS
       if (r._count.attachments >= MAX_PHOTOS) return { ok: false, reason: 'limit' };
       const a = await db.requestAttachment.create({ data: { requestId, type: 'image', ref: encodeRef({}) } });
       return { ok: true, id: a.id };
+    },
+    async houseActivity(maxUserId, since) {
+      const id = await userId(maxUserId);
+      const apt = await db.apartment.findUnique({ where: { userId: id }, select: { houseId: true } });
+      if (!apt) return [];
+      const rows = await db.request.findMany({
+        where: { houseId: apt.houseId, userId: { not: id }, createdAt: { gte: since } },
+        select: { category: true, createdAt: true },
+        orderBy: { createdAt: 'desc' },
+        take: 500,
+      });
+      return rows.map((r) => ({ category: r.category as RequestCategory, createdAt: r.createdAt }));
     },
     async getChatId(maxUserId) {
       const u = await db.user.findUnique({ where: { maxUserId }, select: { maxChatId: true } });

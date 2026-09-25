@@ -234,6 +234,27 @@ describe('API мини-приложения', () => {
     assert.equal((await call('/api/requests', { method: 'POST', token: tokenFor(ME), body })).status, 201);
   });
 
+  it('уведомления: свои статусы и «соседи уже сообщили» — без чужого текста и квартиры; хронология в карточке', async () => {
+    const house = HOUSES.find((h) => h.code === 'kzn_0018')!.id;
+    store.apartments.set(ME, { houseId: house, number: '42', entrance: 2 });
+    store.apartments.set(OTHER, { houseId: house, number: '7', entrance: 1 });
+    store.apartments.set('far', { houseId: HOUSES[1]!.id, number: '1', entrance: null });
+    await store.createRequest(OTHER, { address: 'ул. Баумана, д. 15, кв. 7', category: 'elevator', description: 'СЕКРЕТНЫЙ текст соседа', orgType: 'UK', dueAt: new Date(clock.now + 86_400_000) });
+    await store.createRequest('far', { address: 'x', category: 'roof', description: 'другой дом', orgType: 'UK', dueAt: new Date(clock.now + 86_400_000) });
+    const mine = await store.createRequest(ME, { address: 'a', category: 'heating', description: 'Течёт батарея', orgType: 'UK', dueAt: new Date(clock.now + 3_600_000) });
+    clock.now += 2 * 3_600_000;
+    const res = await call('/api/notifications', { token: tokenFor(ME) });
+    const raw = await res.text();
+    assert.doesNotMatch(raw, /СЕКРЕТНЫЙ|кв\. 7|другой дом/, 'чужие тексты и квартиры не утекают');
+    const { items } = JSON.parse(raw) as { items: Array<Record<string, any>> };
+    assert.ok(items.some((n) => n.kind === 'neighbors' && n.text === '1 заявка «Лифт» в вашем доме за неделю' && n.category === 'elevator'));
+    assert.ok(!items.some((n) => /Крыша/.test(n.text)), 'заявки из другого дома не показываются');
+    assert.ok(items.some((n) => n.kind === 'status' && n.request_id === mine.id && n.text === 'Срок истёк'));
+    const card = (await (await call(`/api/requests/${mine.id}`, { token: tokenFor(ME) })).json()) as { timeline: Array<{ type: string; label: string }> };
+    assert.deepEqual(card.timeline.map((e) => e.type), ['created', 'accepted', 'in_progress', 'overdue']);
+    clock.now -= 2 * 3_600_000;
+  });
+
   it('лимит запросов на пользователя → 429', async () => {
     const t = tokenFor('99999');
     const codes: number[] = [];

@@ -2,6 +2,7 @@ import { Button } from '@maxhub/max-ui';
 import { useEffect, useRef, useState } from 'react';
 import { api, AuthError, type Apartment, type Catalog, type RequestItem } from '../api';
 import { compressImage } from '../image';
+import { draft } from '../store';
 import { orgName } from '../ui';
 
 type Photo = { key: string; blob: Blob; url: string };
@@ -16,11 +17,16 @@ export function NewRequest(props: {
   apartment: Apartment;
   onCreated: (r: RequestItem, note: string | null) => void;
   onAuthError: (e: AuthError) => void;
+  /** Категория, выбранная заранее (например, из «Соседи уже сообщили»). */
+  initialCategory?: string | null;
 }) {
   const { catalog, apartment } = props;
-  const [text, setText] = useState('');
-  const [category, setCategory] = useState<string | null>(null);
-  const [manual, setManual] = useState(false);
+  // Черновик: текст и категория переживают закрытие приложения (фото — нет: они слишком тяжёлые для хранилища)
+  const [saved] = useState(() => (props.initialCategory ? null : draft.load()));
+  const [text, setText] = useState(saved?.text ?? '');
+  const [category, setCategory] = useState<string | null>(props.initialCategory ?? saved?.category ?? null);
+  const [manual, setManual] = useState(!!props.initialCategory || !!saved?.manual);
+  const [restored, setRestored] = useState(!!saved?.text);
   const [gas, setGas] = useState(false);
   const [photos, setPhotos] = useState<Photo[]>([]);
   const [busy, setBusy] = useState<string | null>(null);
@@ -47,6 +53,12 @@ export function NewRequest(props: {
   }, [text, manual, catalog.min_description]);
 
   useEffect(() => () => photos.forEach((p) => URL.revokeObjectURL(p.url)), []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    if (busy) return;
+    const t = setTimeout(() => draft.save({ text, category, manual }), 400);
+    return () => clearTimeout(t);
+  }, [text, category, manual, busy]);
 
   const cat = catalog.categories.find((c) => c.id === category) ?? null;
   const responsible = cat?.org_type === 'TKO' ? 'Региональный оператор по вывозу мусора (ТКО)' : apartment.uk ? orgName(apartment.uk) : 'Управляющая компания дома';
@@ -105,6 +117,7 @@ export function NewRequest(props: {
           failed++;
         }
       }
+      draft.clear();
       const updated = photos.length ? await api.request(res.request.id).catch(() => res.request) : res.request;
       props.onCreated(
         updated,
@@ -119,6 +132,24 @@ export function NewRequest(props: {
 
   return (
     <div className="stack">
+      {restored && (
+        <div className="banner" role="status">
+          Восстановили черновик.{' '}
+          <button
+            className="linkish notif__action"
+            style={{ display: 'inline', margin: 0 }}
+            onClick={() => {
+              setText('');
+              setCategory(null);
+              setManual(false);
+              setRestored(false);
+              draft.clear();
+            }}
+          >
+            Начать заново
+          </button>
+        </div>
+      )}
       <section className="card">
         <label className="field__label" htmlFor="problem">
           Что случилось и где

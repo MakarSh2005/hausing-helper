@@ -65,7 +65,7 @@ export function memoryStore(houses = HOUSES) {
         houseId: a.house.id, org: r.orgType === 'UK' ? a.house.manager : TKO_ORG, address: r.address,
         photos: (r.photos ?? []).map((p, i) => ({ ...p, id: `r${counter}p${i}` })),
         category: r.category, description: r.description, status: 'created', createdAt: new Date(clock.now), dueAt: r.dueAt,
-        reminderSentAt: null,
+        reminderSentAt: null, updatedAt: new Date(clock.now),
       };
       requests.push(row);
       return view(row);
@@ -77,13 +77,14 @@ export function memoryStore(houses = HOUSES) {
     },
     setRequestStatus: async (u, id, status) => {
       const r = requests.find((x) => x.id === id && x.user === u);
-      if (r) r.status = status;
+      if (r) (r.status = status), (r.updatedAt = new Date(clock.now));
     },
     cancelRequest: async (u, id) => {
       const r = requests.find((x) => x.id === id && x.user === u);
       if (!r) return 'not_found';
       if (!['created', 'accepted', 'in_progress'].includes(r.status)) return 'closed';
       r.status = 'cancelled';
+      r.updatedAt = new Date(clock.now);
       return 'ok';
     },
     overdueRequests: async (q) =>
@@ -104,6 +105,13 @@ export function memoryStore(houses = HOUSES) {
       return { ok: true, id: photo.id };
     },
     getChatId: async () => 'c1',
+    houseActivity: async (u, since) => {
+      const mine = apartments.get(u);
+      if (!mine) return [];
+      return requests
+        .filter((r) => r.user !== u && r.houseId === mine.houseId && r.createdAt >= since)
+        .map((r) => ({ category: r.category, createdAt: r.createdAt }));
+    },
     markReminded: async (id, at) => {
       const r = requests.find((x) => x.id === id);
       if (!r || r.reminderSentAt) return false;

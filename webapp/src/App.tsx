@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
-import { api, AuthError, login, NetworkError, type Apartment as Apt, type Catalog, type RequestItem } from './api';
+import { api, AuthError, login, NetworkError, type Apartment as Apt, type AppNotification, type Catalog, type RequestItem } from './api';
+import { Header, Notifications } from './components';
+import { notifSeen } from './store';
 import { insideMax, openBotChat, startParam, tap, webApp } from './bridge';
 import { Apartment } from './screens/Apartment';
 import { NewRequest } from './screens/NewRequest';
@@ -7,7 +9,7 @@ import { RequestDetails } from './screens/RequestDetails';
 import { Requests } from './screens/Requests';
 import { Loading, StateScreen } from './ui';
 
-type Route = { name: 'requests' } | { name: 'request'; id: string } | { name: 'apartment' } | { name: 'new' };
+type Route = { name: 'requests' } | { name: 'request'; id: string } | { name: 'apartment' } | { name: 'new' } | { name: 'notifications' };
 
 const BASE = '/app/';
 
@@ -17,6 +19,7 @@ function parseRoute(pathname: string): Route {
   if (m) return { name: 'request', id: m[1]! };
   if (/^apartment\/?$/.test(rest)) return { name: 'apartment' };
   if (/^new\/?$/.test(rest)) return { name: 'new' };
+  if (/^notifications\/?$/.test(rest)) return { name: 'notifications' };
   return { name: 'requests' };
 }
 /** Экран из параметра запуска бота: «apartment» или «req_<id>». */
@@ -31,9 +34,9 @@ function initialRoute(): Route {
   return fromPath;
 }
 const routePath = (r: Route) =>
-  BASE + (r.name === 'request' ? `requests/${r.id}` : r.name === 'apartment' ? 'apartment' : r.name === 'new' ? 'new' : '');
+  BASE + (r.name === 'request' ? `requests/${r.id}` : r.name === 'requests' ? '' : r.name);
 /** Экраны без вкладок, с кнопкой «Назад». */
-const isInner = (r: Route) => r.name === 'request' || r.name === 'new';
+const isInner = (r: Route) => r.name === 'request' || r.name === 'new' || r.name === 'notifications';
 
 type Phase =
   | { kind: 'auth' }
@@ -52,6 +55,11 @@ export function App() {
   const [bot, setBot] = useState<string | null>(null);
   const [catalog, setCatalog] = useState<Data<Catalog>>({ status: 'idle' });
   const [banner, setBanner] = useState<{ text: string; warn?: boolean } | null>(null);
+  const [notifs, setNotifs] = useState<AppNotification[]>([]);
+  const [seen, setSeen] = useState(() => notifSeen.get());
+  /** Граница «новых» на экране уведомлений — до того, как отметили их просмотренными. */
+  const [seenBefore, setSeenBefore] = useState(0);
+  const [newCategory, setNewCategory] = useState<string | null>(null);
 
   const fail = useCallback((err: unknown, set: (d: Data<never>) => void) => {
     if (err instanceof AuthError) setPhase({ kind: 'auth_error', problem: err.problem });
@@ -81,13 +89,43 @@ export function App() {
     doLogin();
   }, [doLogin]);
 
+  // Квартира нужна везде: шапка (телефоны аварийных служб) и форма заявки
+  useEffect(() => {
+    if (phase.kind === 'ready') loadApartment();
+  }, [phase.kind, loadApartment]);
+
+  // Уведомления: при входе, раз в минуту и при возвращении в приложение
+  const loadNotifs = useCallback(() => {
+    api.notifications().then((r) => setNotifs(r.items), () => {});
+  }, []);
+  useEffect(() => {
+    if (phase.kind !== 'ready') return;
+    loadNotifs();
+    const t = setInterval(() => document.visibilityState === 'visible' && loadNotifs(), 60_000);
+    const onVisible = () => document.visibilityState === 'visible' && loadNotifs();
+    document.addEventListener('visibilitychange', onVisible);
+    return () => {
+      clearInterval(t);
+      document.removeEventListener('visibilitychange', onVisible);
+    };
+  }, [phase.kind, loadNotifs]);
+  useEffect(() => {
+    if (route.name !== 'notifications') return;
+    setSeenBefore(seen);
+    const now = Date.now();
+    notifSeen.set(now);
+    setSeen(now);
+    loadNotifs();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [route.name]);
+  const unread = notifs.filter((n) => new Date(n.at).getTime() > seen).length;
+
   // Данные под текущий экран
   useEffect(() => {
     if (phase.kind !== 'ready') return;
     if (route.name === 'requests') loadRequests();
     if (route.name === 'apartment') loadApartment();
     if (route.name === 'new') {
-      loadApartment();
       if (catalog.status !== 'ok') api.catalog().then((c) => setCatalog({ status: 'ok', value: c }), (e) => fail(e, setCatalog));
     }
     if (route.name !== 'request') setBanner(null);
@@ -216,17 +254,26 @@ export function App() {
   const onTab = (name: 'requests' | 'apartment') => {
     if (route.name !== name) go({ name });
   };
+  const openNew = (category: string | null = null) => {
+    setNewCategory(category);
+    go({ name: 'new' });
+  };
 
   return (
     <main className="page">
       <div className="page__inner">
+      <Header
+        apartment={apartment.status === 'ok' ? apartment.value : null}
+        unread={route.name === 'notifications' ? 0 : unread}
+        onBell={() => route.name !== 'notifications' && go({ name: 'notifications' })}
+      />
       {!isInner(route) && (
         <div className="tabs" role="tablist" aria-label="Разделы">
-          <button className="tab" role="tab" aria-selected={route.name === 'requests'} onClick={() => onTab('requests')}>
-            Заявки
-          </button>
           <button className="tab" role="tab" aria-selected={route.name === 'apartment'} onClick={() => onTab('apartment')}>
             Квартира
+          </button>
+          <button className="tab" role="tab" aria-selected={route.name === 'requests'} onClick={() => onTab('requests')}>
+            Заявки
           </button>
         </div>
       )}
@@ -238,10 +285,18 @@ export function App() {
           </a>
         </div>
       )}
-      {route.name === 'new' && (
+      {(route.name === 'new' || route.name === 'notifications') && (
         <h1 className="gutter" style={{ fontSize: 22, margin: '0 0 12px', color: 'var(--text-primary)' }}>
-          Новая заявка
+          {route.name === 'new' ? 'Новая заявка' : 'Уведомления'}
         </h1>
+      )}
+      {route.name === 'notifications' && (
+        <Notifications
+          items={notifs}
+          seenBefore={seenBefore}
+          onOpenRequest={(id) => go({ name: 'request', id })}
+          onJoin={(category) => openNew(category)}
+        />
       )}
       {banner && route.name === 'request' && (
         <div className={`banner${banner.warn ? ' banner--warn' : ''}`} role="status" style={{ marginBottom: 12 }}>
@@ -251,7 +306,7 @@ export function App() {
 
       {route.name === 'requests' && (
         <DataView data={requests} retry={loadRequests}>
-          {(items) => <Requests items={items} onOpen={(id) => go({ name: 'request', id })} onNew={() => go({ name: 'new' })} />}
+          {(items) => <Requests items={items} onOpen={(id) => go({ name: 'request', id })} onNew={() => openNew()} />}
         </DataView>
       )}
       {route.name === 'request' && (
@@ -275,7 +330,14 @@ export function App() {
         <DataView data={both(apartment, catalog)} retry={() => setRoute({ name: 'new' })}>
           {([a, c]) =>
             a ? (
-              <NewRequest catalog={c} apartment={a} onCreated={onCreated} onAuthError={(e) => setPhase({ kind: 'auth_error', problem: e.problem })} />
+              <NewRequest
+                key={newCategory ?? 'plain'}
+                catalog={c}
+                apartment={a}
+                initialCategory={newCategory}
+                onCreated={(r, note) => (setNewCategory(null), onCreated(r, note), loadNotifs())}
+                onAuthError={(e) => setPhase({ kind: 'auth_error', problem: e.problem })}
+              />
             ) : (
               <StateScreen
                 title="Сначала укажите адрес"

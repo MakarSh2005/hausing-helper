@@ -23,7 +23,7 @@ export function Requests(props: { items: RequestItem[]; onOpen: (id: string) => 
           Подать заявку
         </Button>
       </div>
-      <CellList mode="island" filled header={<span className="note" style={{ margin: 0 }}>{open ? `Открытых: ${open}` : 'Все заявки закрыты'}</span>}>
+      <CellList mode="island" filled header={<span className="note" style={{ margin: 0 }}>{open ? `Открытых: ${open}` : 'Архив заявок'}</span>}>
         {props.items.map((r) => (
           <CellSimple
             key={r.id}
