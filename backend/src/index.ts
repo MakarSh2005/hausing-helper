@@ -73,9 +73,7 @@ async function main() {
   const bot = createRouter({
     db, max, logger,
     options: {
-      demoStatuses: config.MOCK_AUTO_STATUS_CHANGE,
       demoDueMinutes: config.DEMO_DUE_MINUTES,
-      photoStorage,
       // Код входа — во фрагменте (#): он не уходит на сервер в строке запроса и не попадает в логи.
       appLink: appBase
         ? (userId, path = '') => `${appBase}/app/${path}#t=${issueSessionToken(userId, appLinkKey, LINK_TTL_SEC)}`

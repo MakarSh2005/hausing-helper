@@ -222,3 +222,100 @@ body {
   color: rgba(255, 255, 255, 0.7);
   font-size: 13px;
 }
+
+/* ── подача заявки ── */
+.input {
+  width: 100%;
+  margin: 6px 0 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--divider-primary, rgba(127, 127, 127, 0.3));
+  border-radius: 12px;
+  background: var(--background-primary);
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 16px; /* меньше 16 px — iOS увеличивает страницу при фокусе */
+  line-height: 22px;
+  resize: vertical;
+}
+.input:focus-visible {
+  outline: 2px solid var(--text-themed);
+  outline-offset: 1px;
+}
+.chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+}
+.chip {
+  appearance: none;
+  border: 1px solid var(--divider-primary, rgba(127, 127, 127, 0.3));
+  border-radius: 999px;
+  padding: 7px 12px;
+  background: transparent;
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 14px;
+  cursor: pointer;
+}
+.chip[aria-checked='true'] {
+  border-color: var(--text-themed);
+  background: var(--text-themed);
+  color: #fff;
+}
+.chip:focus-visible,
+.photo__remove:focus-visible {
+  outline: 2px solid var(--text-themed);
+  outline-offset: 2px;
+}
+.photo {
+  position: relative;
+}
+.photo--add {
+  border: 1px dashed var(--divider-primary, rgba(127, 127, 127, 0.4));
+  background: transparent;
+  color: var(--text-themed);
+  font-weight: 600;
+  font-size: 14px;
+}
+.photo__remove {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  width: 28px;
+  height: 28px;
+  border: 0;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.6);
+  color: #fff;
+  font-size: 18px;
+  line-height: 28px;
+  cursor: pointer;
+}
+.card--danger {
+  border: 1px solid var(--text-negative);
+}
+.banner {
+  margin: 0 16px;
+  padding: 12px 14px;
+  border-radius: 12px;
+  background: var(--background-card);
+  border-left: 4px solid var(--icon-positive);
+  color: var(--text-primary);
+  font-size: 15px;
+  line-height: 20px;
+}
+.banner--warn {
+  border-left-color: var(--text-negative);
+}
+.complaint {
+  white-space: pre-wrap;
+  font-size: 14px;
+  line-height: 20px;
+  margin: 8px 0 12px;
+  padding: 12px;
+  border-radius: 10px;
+  background: var(--background-tertiary);
+  color: var(--text-primary);
+  overflow-wrap: anywhere;
+}

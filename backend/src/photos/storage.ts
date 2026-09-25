@@ -15,9 +15,21 @@ export const CONTENT_TYPES: Record<string, string> = Object.fromEntries(Object.e
 export interface PhotoStorage {
   /** Скачать фото и сохранить; вернуть имя файла или null (ошибка записана в лог). */
   download(url: string, id: string): Promise<string | null>;
+  /** Сохранить присланные байты (загрузка из мини-приложения). Тип — по сигнатуре файла, не по заголовку. */
+  save(buf: Buffer, id: string): Promise<string | null>;
   /** Полный путь к сохранённому файлу или null, если его нет. */
   resolve(file: string): string | null;
 }
+
+/** Тип картинки по первым байтам: заголовку Content-Type от клиента не верим. */
+export function sniffImage(buf: Buffer): 'jpg' | 'png' | 'webp' | null {
+  if (buf.length >= 3 && buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return 'jpg';
+  if (buf.length >= 8 && buf.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) return 'png';
+  if (buf.length >= 12 && buf.toString('ascii', 0, 4) === 'RIFF' && buf.toString('ascii', 8, 12) === 'WEBP') return 'webp';
+  return null;
+}
+
+export const MAX_PHOTO_BYTES = MAX_BYTES;
 
 export function createPhotoStorage(deps: { dir: string; fetchImpl?: typeof fetch; logger: Logger }): PhotoStorage {
   const dir = path.resolve(deps.dir, 'photos');
@@ -25,7 +37,26 @@ export function createPhotoStorage(deps: { dir: string; fetchImpl?: typeof fetch
   const log = deps.logger.child({ module: 'photos' });
   fs.mkdirSync(dir, { recursive: true });
 
+  async function write(buf: Buffer, id: string, ext: string): Promise<string> {
+    const file = `${id}.${ext}`;
+    const tmp = path.join(dir, `.${file}.tmp`);
+    await fs.promises.writeFile(tmp, buf);
+    await fs.promises.rename(tmp, path.join(dir, file));
+    return file;
+  }
+
   return {
+    async save(buf, id) {
+      if (!/^[A-Za-z0-9-]{1,64}$/.test(id) || buf.length === 0 || buf.length > MAX_BYTES) return null;
+      const ext = sniffImage(buf);
+      if (!ext) return null;
+      try {
+        return await write(buf, id, ext);
+      } catch (err) {
+        log.warn(`фото: не удалось сохранить — ${(err as Error).message}`);
+        return null;
+      }
+    },
     async download(url, id) {
       if (!/^[A-Za-z0-9-]{1,64}$/.test(id) || !/^https:\/\//.test(url)) return null;
       const ctrl = new AbortController();
@@ -48,11 +79,7 @@ export function createPhotoStorage(deps: { dir: string; fetchImpl?: typeof fetch
           log.warn(`фото: пустое или слишком большое (${buf.length} байт)`);
           return null;
         }
-        const file = `${id}.${ext}`;
-        const tmp = path.join(dir, `.${file}.tmp`);
-        await fs.promises.writeFile(tmp, buf);
-        await fs.promises.rename(tmp, path.join(dir, file));
-        return file;
+        return await write(buf, id, ext);
       } catch (err) {
         log.warn(`фото: ошибка скачивания — ${(err as Error).message}`);
         return null;

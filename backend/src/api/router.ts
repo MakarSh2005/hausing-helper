@@ -5,9 +5,12 @@ import { issueSessionToken, linkSecret, verifySessionToken } from '../auth/sessi
 import { validateWebAppData } from '../auth/webAppData.js';
 import type { ApartmentInfo, BotStore, OrgInfo, RequestInfo } from '../bot/store.js';
 import { formatAddress } from '../domain/address.js';
-import { NORMS } from '../domain/norms.js';
+import { complaintText } from '../domain/complaint.js';
+import { MAX_PHOTOS } from '../domain/photos.js';
+import { CATEGORY_ORDER, NORMS } from '../domain/norms.js';
+import { MAX_DESCRIPTION, MIN_DESCRIPTION, submitRequest, suggestCategory } from '../requests/service.js';
 import { effectiveStatus, OPEN_STATUSES, STATUS_LABEL } from '../domain/requestStatus.js';
-import { CONTENT_TYPES, type PhotoStorage } from '../photos/storage.js';
+import { CONTENT_TYPES, MAX_PHOTO_BYTES, sniffImage, type PhotoStorage } from '../photos/storage.js';
 import { SlidingWindowLimiter } from '../webhook/rateLimit.js';
 
 /**
@@ -38,6 +41,8 @@ export interface ApiDeps {
 const SessionBody = z.object({ web_app_data: z.string().min(1).max(8192) });
 const LinkBody = z.object({ code: z.string().min(1).max(2048) });
 const RequestId = z.string().regex(/^[A-Za-z0-9-]{1,64}$/);
+const NewRequestBody = z.object({ description: z.string().max(4000), category: z.string().max(32) });
+const SuggestBody = z.object({ description: z.string().max(4000) });
 
 type Locals = { userId: string };
 
@@ -88,6 +93,9 @@ function requestView(r: RequestInfo, now: Date, demo: boolean) {
     status_label: STATUS_LABEL[status],
     status_is_demo: status !== r.status,
     can_cancel: open,
+    // «Проблема решена» — по открытой; жалоба в ГЖИ — когда срок истёк
+    can_resolve: open,
+    can_complain: open && r.dueAt <= now,
     created_at: r.createdAt.toISOString(),
     due_at: r.dueAt.toISOString(),
     overdue: open && r.dueAt <= now,
@@ -194,6 +202,112 @@ export function createApiRouter(deps: ApiDeps) {
       return;
     }
     res.json(requestView(r, clock(), !!deps.demoStatuses));
+  });
+
+  // ── подача заявки из мини-приложения ────────────────────────────────────
+
+  router.get('/catalog', auth, (_req, res) => {
+    res.set('Cache-Control', 'private, max-age=3600');
+    res.json({
+      categories: CATEGORY_ORDER.map((c) => ({
+        id: c, title: NORMS[c].title, what: NORMS[c].what, ref: NORMS[c].ref, org_type: NORMS[c].orgType,
+      })),
+      max_photos: MAX_PHOTOS,
+      min_description: MIN_DESCRIPTION,
+      max_description: MAX_DESCRIPTION,
+    });
+  });
+
+  router.post('/requests/suggest', auth, express.json({ limit: '16kb' }), (req, res) => {
+    const body = SuggestBody.safeParse(req.body);
+    const category = body.success ? suggestCategory(body.data.description) : null;
+    res.json({ category: category === 'gas' ? null : category, gas: category === 'gas' });
+  });
+
+  router.post('/requests', auth, express.json({ limit: '16kb' }), async (req, res: Response<unknown, Locals>) => {
+    const body = NewRequestBody.safeParse(req.body);
+    if (!body.success) {
+      res.status(400).json({ error: 'bad_request' });
+      return;
+    }
+    const r = await submitRequest(deps.store, res.locals.userId, body.data, clock());
+    if (!r.ok) {
+      const status = r.reason === 'no_apartment' ? 409 : r.reason === 'gas' ? 422 : 400;
+      res.status(status).json({ error: r.reason });
+      return;
+    }
+    if (!r.duplicate) log.info({ userId: res.locals.userId, number: r.request.number }, `api: заявка ${r.request.number} создана в мини-приложении (${r.request.category})`);
+    res.status(r.duplicate ? 200 : 201).json(requestView(r.request, clock(), !!deps.demoStatuses));
+  });
+
+  // Фото — отдельными запросами после создания заявки: тело — сами байты картинки (мини-приложение
+  // сжимает её до ~1600 px). Тип определяем по сигнатуре файла, заголовку клиента не верим.
+  router.post(
+    '/requests/:id/photos',
+    auth,
+    express.raw({ type: () => true, limit: MAX_PHOTO_BYTES }),
+    async (req, res: Response<unknown, Locals>) => {
+      const id = RequestId.safeParse(req.params.id);
+      const buf = Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0);
+      if (!id.success) {
+        res.status(404).json({ error: 'not_found' });
+        return;
+      }
+      if (!sniffImage(buf) || !deps.photoStorage) {
+        res.status(400).json({ error: 'not_image' });
+        return;
+      }
+      const added = await deps.store.addPhoto(res.locals.userId, id.data);
+      if (!added.ok) {
+        res.status(added.reason === 'not_found' ? 404 : 409).json({ error: added.reason });
+        return;
+      }
+      const file = await deps.photoStorage.save(buf, added.id);
+      if (!file) {
+        res.status(500).json({ error: 'save_failed' });
+        return;
+      }
+      await deps.store.setPhotoFile(added.id, file);
+      res.status(201).json({ id: added.id });
+    },
+  );
+
+  router.post('/requests/:id/resolve', auth, async (req, res: Response<unknown, Locals>) => {
+    const id = RequestId.safeParse(req.params.id);
+    const r = id.success ? await deps.store.getRequest(res.locals.userId, id.data) : null;
+    if (!r) {
+      res.status(404).json({ error: 'not_found' });
+      return;
+    }
+    if (!OPEN_STATUSES.includes(r.status)) {
+      res.status(409).json({ error: 'already_closed' });
+      return;
+    }
+    await deps.store.setRequestStatus(res.locals.userId, r.id, 'completed');
+    log.info({ userId: res.locals.userId, number: r.number }, `api: заявка ${r.number} закрыта жильцом как решённая`);
+    res.json(requestView((await deps.store.getRequest(res.locals.userId, r.id))!, clock(), !!deps.demoStatuses));
+  });
+
+  router.get('/requests/:id/complaint', auth, async (req, res: Response<unknown, Locals>) => {
+    const id = RequestId.safeParse(req.params.id);
+    const r = id.success ? await deps.store.getRequest(res.locals.userId, id.data) : null;
+    if (!r || r.category === 'gas') {
+      res.status(404).json({ error: 'not_found' });
+      return;
+    }
+    res.json({
+      text: complaintText({
+        description: r.description,
+        address: `${r.house.fullAddress.split(',')[0]}, ${r.address}`,
+        orgName: r.org ? r.org.name : null,
+        norm: NORMS[r.category],
+        createdAt: r.createdAt,
+        dueAt: r.dueAt,
+        photos: r.photos.length,
+      }),
+      where: 'Подать жалобу можно через Госуслуги или ГИС ЖКХ (dom.gosuslugi.ru), либо письмом в ГЖИ Республики Татарстан.',
+      note: 'В тестовом режиме сервис не передаёт заявки в УК. Жалоба имеет смысл, если вы обращались в УК сами — укажите дату и способ обращения.',
+    });
   });
 
   // Фото заявки: только своей, только с нашего диска. Картинки в <img> не шлют заголовок

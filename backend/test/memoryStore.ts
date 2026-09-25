@@ -94,6 +94,16 @@ export function memoryStore(houses = HOUSES) {
     setPhotoFile: async (photoId, file) => {
       for (const r of requests) for (const p of r.photos) if (p.id === photoId) p.file = file;
     },
+    addPhoto: async (u, id) => {
+      const r = requests.find((x) => x.id === id && x.user === u);
+      if (!r) return { ok: false, reason: 'not_found' };
+      if (!['created', 'accepted', 'in_progress'].includes(r.status)) return { ok: false, reason: 'closed' };
+      if (r.photos.length >= 5) return { ok: false, reason: 'limit' };
+      const photo = { id: `${r.id}p${r.photos.length}` };
+      r.photos.push(photo);
+      return { ok: true, id: photo.id };
+    },
+    getChatId: async () => 'c1',
     markReminded: async (id, at) => {
       const r = requests.find((x) => x.id === id);
       if (!r || r.reminderSentAt) return false;

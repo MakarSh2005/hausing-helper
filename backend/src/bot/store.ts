@@ -1,6 +1,6 @@
 import type { Db } from '../db.js';
 import { formatAddress } from '../domain/address.js';
-import { decodeRef, encodeRef, type PhotoRef, type StoredPhoto } from '../domain/photos.js';
+import { decodeRef, encodeRef, MAX_PHOTOS, type PhotoRef, type StoredPhoto } from '../domain/photos.js';
 import type { OrgType, RequestCategory, RequestStatus } from '../domain/enums.js';
 
 /**
@@ -121,6 +121,13 @@ export interface BotStore {
   markReminded(id: string, at: Date): Promise<boolean>;
   /** Файл фото скачан на диск. */
   setPhotoFile(photoId: string, file: string): Promise<void>;
+  /**
+   * Добавить фото к своей открытой заявке (загрузка из мини-приложения). Лимит — MAX_PHOTOS.
+   * Возвращает id вложения — под ним затем сохраняется файл.
+   */
+  addPhoto(maxUserId: string, requestId: string): Promise<{ ok: true; id: string } | { ok: false; reason: 'not_found' | 'closed' | 'limit' }>;
+  /** chat_id диалога с пользователем — чтобы бот мог написать первым. */
+  getChatId(maxUserId: string): Promise<string | null>;
 }
 
 export const IDLE: Session = { state: 'idle', data: {} };
@@ -329,6 +336,21 @@ export function createPrismaStore(db: Db, opts: { cacheMs?: number } = {}): BotS
       const a = await db.requestAttachment.findUnique({ where: { id: photoId } });
       if (!a) return;
       await db.requestAttachment.update({ where: { id: photoId }, data: { ref: encodeRef({ ...decodeRef(a.id, a.ref), file }) } });
+    },
+    async addPhoto(maxUserId, requestId) {
+      const r = await db.request.findFirst({
+        where: { id: requestId, userId: await userId(maxUserId) },
+        select: { status: true, _count: { select: { attachments: true } } },
+      });
+      if (!r) return { ok: false, reason: 'not_found' };
+      if (!OPEN.includes(r.status as RequestStatus)) return { ok: false, reason: 'closed' };
+      if (r._count.attachments >= MAX_PHOTOS) return { ok: false, reason: 'limit' };
+      const a = await db.requestAttachment.create({ data: { requestId, type: 'image', ref: encodeRef({}) } });
+      return { ok: true, id: a.id };
+    },
+    async getChatId(maxUserId) {
+      const u = await db.user.findUnique({ where: { maxUserId }, select: { maxChatId: true } });
+      return u?.maxChatId ?? null;
     },
     async markReminded(id, at) {
       const res = await db.request.updateMany({ where: { id, reminderSentAt: null }, data: { reminderSentAt: at } });

@@ -56,7 +56,7 @@ describe('API мини-приложения', () => {
     fs.writeFileSync(path.join(webappDir, 'assets', 'main-abc.js'), 'console.log(1)');
     const api = createApiRouter({
       store, logger, botToken: TOKEN, sessionSecret: SECRET, sessionTtlSec: 3600,
-      demoStatuses: true, now: () => new Date(clock.now), perUserPerMin: 20,
+      demoStatuses: true, now: () => new Date(clock.now), perUserPerMin: 40,
     });
     server = createApp({ db, logger, webhook, api, webappDir }).listen(0);
     await new Promise((r) => server.once('listening', r));
@@ -170,12 +170,76 @@ describe('API мини-приложения', () => {
     assert.equal(again.status, 409);
   });
 
+  it('подача заявки из мини-приложения: категория, превью, создание, дубль, газ, без квартиры', async () => {
+    const t = tokenFor(ME);
+    const json = (p: string, body: unknown, token = t) => call(p, { method: 'POST', token, body: JSON.stringify(body) });
+    assert.equal((await json('/api/requests', { description: 'Течёт батарея', category: 'heating' })).status, 409, 'без квартиры');
+    store.apartments.set(ME, { houseId: HOUSES.find((h) => h.code === 'kzn_0018')!.id, number: '42', entrance: 2 });
+
+    const cat = (await (await call('/api/catalog', { token: t })).json()) as { categories: Array<{ id: string; title: string }>; max_photos: number };
+    assert.equal(cat.max_photos, 5);
+    assert.ok(cat.categories.some((c) => c.id === 'heating' && c.title === 'Отопление'));
+    assert.ok(!cat.categories.some((c) => c.id === 'gas'), 'газа среди категорий нет');
+
+    assert.deepEqual(await (await json('/api/requests/suggest', { description: 'Течёт батарея в комнате' })).json(), { category: 'heating', gas: false });
+    assert.deepEqual(await (await json('/api/requests/suggest', { description: 'Пахнет газом' })).json(), { category: null, gas: true });
+
+    const created = await json('/api/requests', { description: '  Течёт   батарея в комнате ', category: 'heating' });
+    assert.equal(created.status, 201);
+    const r = (await created.json()) as Record<string, any>;
+    assert.match(r.number, /^REQ-2026-\d{5}$/);
+    assert.equal(r.description, 'Течёт батарея в комнате');
+    assert.equal(r.address, 'ул. Баумана, д. 15, кв. 42, подъезд 2');
+    assert.equal(r.norm.ref, 'п. 108 Правил № 354, п. 13 Правил № 416');
+    assert.equal(new Date(r.due_at).getTime() - clock.now, 2 * 3_600_000);
+
+    const again = await json('/api/requests', { description: 'Течёт батарея в комнате', category: 'heating' });
+    assert.equal(again.status, 200, 'повторная отправка того же — та же заявка');
+    assert.equal(((await again.json()) as { id: string }).id, r.id);
+    assert.equal(store.requests.filter((x) => x.user === ME).length, 1);
+
+    assert.deepEqual(await (await json('/api/requests', { description: 'Пахнет газом в подъезде', category: 'other' })).json(), { error: 'gas' });
+    assert.deepEqual(await (await json('/api/requests', { description: 'ой', category: 'other' })).json(), { error: 'too_short' });
+    assert.deepEqual(await (await json('/api/requests', { description: 'Сломана лавочка во дворе', category: 'nope' })).json(), { error: 'bad_category' });
+  });
+
+  it('«Проблема решена» и текст жалобы в ГЖИ — только по своей заявке', async () => {
+    store.apartments.set(ME, { houseId: HOUSES.find((h) => h.code === 'kzn_0018')!.id, number: '42', entrance: 2 });
+    store.apartments.set(OTHER, { houseId: HOUSES[0]!.id, number: '7', entrance: null });
+    const mine = await store.createRequest(ME, { address: 'ул. Баумана, д. 15, кв. 42, подъезд 2', category: 'water', description: 'Прорвало трубу', orgType: 'UK', dueAt: new Date(clock.now - 1000) });
+    const view = (await (await call(`/api/requests/${mine.id}`, { token: tokenFor(ME) })).json()) as Record<string, any>;
+    assert.equal(view.can_complain, true);
+    const c = (await (await call(`/api/requests/${mine.id}/complaint`, { token: tokenFor(ME) })).json()) as { text: string; where: string };
+    assert.match(c.text, /^В Государственную жилищную инспекцию Республики Татарстан[\s\S]*Адрес: Казань, ул\. Баумана, д\. 15, кв\. 42, подъезд 2[\s\S]*«Прорвало трубу»/);
+    assert.equal((await call(`/api/requests/${mine.id}/complaint`, { token: tokenFor(OTHER) })).status, 404);
+    assert.equal((await call(`/api/requests/${mine.id}/resolve`, { method: 'POST', token: tokenFor(OTHER) })).status, 404);
+    const done = await call(`/api/requests/${mine.id}/resolve`, { method: 'POST', token: tokenFor(ME) });
+    assert.equal(done.status, 200);
+    const d = (await done.json()) as Record<string, any>;
+    assert.equal(d.status, 'completed');
+    assert.equal(d.can_resolve, false);
+    assert.equal(d.can_complain, false);
+    assert.equal((await call(`/api/requests/${mine.id}/resolve`, { method: 'POST', token: tokenFor(ME) })).status, 409);
+  });
+
+  it('сбой базы при подаче — 500, повтор после восстановления создаёт заявку', async () => {
+    store.apartments.set(ME, { houseId: HOUSES[0]!.id, number: '1', entrance: null });
+    const original = store.createRequest;
+    store.createRequest = async () => {
+      throw new Error('SQLITE_BUSY');
+    };
+    const body = JSON.stringify({ description: 'Не работает лифт', category: 'elevator' });
+    assert.equal((await call('/api/requests', { method: 'POST', token: tokenFor(ME), body })).status, 500);
+    store.createRequest = original;
+    assert.equal((await call('/api/requests', { method: 'POST', token: tokenFor(ME), body })).status, 201);
+  });
+
   it('лимит запросов на пользователя → 429', async () => {
     const t = tokenFor('99999');
     const codes: number[] = [];
-    for (let i = 0; i < 22; i++) codes.push((await call('/api/me', { token: t })).status);
-    assert.ok(codes.slice(0, 20).every((c) => c === 200));
-    assert.equal(codes[21], 429);
+    for (let i = 0; i < 42; i++) codes.push((await call('/api/me', { token: t })).status);
+    assert.ok(codes.slice(0, 40).every((c) => c === 200));
+    assert.equal(codes[41], 429);
   });
 
   it('/app: index.html без кеша, SPA-маршруты, файлы сборки; неизвестный /api → 404', async () => {

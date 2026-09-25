@@ -3,14 +3,14 @@ import type { RequestItem } from '../api';
 import { shortDate } from '../format';
 import { StatusPill } from '../ui';
 
-export function Requests(props: { items: RequestItem[]; onOpen: (id: string) => void; onWriteBot: () => void }) {
+export function Requests(props: { items: RequestItem[]; onOpen: (id: string) => void; onNew: () => void }) {
   if (props.items.length === 0) {
     return (
-      <div className="state">
+      <div className="state" style={{ minHeight: '60dvh', background: 'transparent' }}>
         <h1>Заявок пока нет</h1>
-        <p>Опишите проблему боту в чате одним сообщением — например, «Течёт батарея в комнате». Бот оформит заявку и назовёт срок.</p>
-        <Button size="medium" onClick={props.onWriteBot}>
-          Написать боту
+        <p>Опишите проблему и приложите фото — мы назовём, кто отвечает и в какой срок по закону должны отреагировать.</p>
+        <Button size="large" onClick={props.onNew}>
+          Подать заявку
         </Button>
       </div>
     );
@@ -18,6 +18,11 @@ export function Requests(props: { items: RequestItem[]; onOpen: (id: string) => 
   const open = props.items.filter((r) => r.can_cancel).length;
   return (
     <div className="stack">
+      <div className="gutter">
+        <Button size="large" stretched onClick={props.onNew}>
+          Подать заявку
+        </Button>
+      </div>
       <CellList mode="island" filled header={<span className="note" style={{ margin: 0 }}>{open ? `Открытых: ${open}` : 'Все заявки закрыты'}</span>}>
         {props.items.map((r) => (
           <CellSimple
@@ -32,7 +37,6 @@ export function Requests(props: { items: RequestItem[]; onOpen: (id: string) => 
           />
         ))}
       </CellList>
-      <p className="note">Новую заявку подают в чате: просто опишите проблему боту.</p>
     </div>
   );
 }

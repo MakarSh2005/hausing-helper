@@ -1,48 +1,40 @@
 import type { Logger } from 'pino';
 import { formatAddress, matchHouse, parseAddressQuery } from '../domain/address.js';
 import { detectCategory } from '../domain/category.js';
-import { complaintText } from '../domain/complaint.js';
-import { extractPhotos, hasNonPhoto, MAX_PHOTOS, type PhotoRef } from '../domain/photos.js';
-import type { RequestCategory } from '../domain/enums.js';
-import { CATEGORY_ORDER, computeDueAt, formatMsk, NORMS, type Norm } from '../domain/norms.js';
-import { effectiveStatus, isOpen, OPEN_STATUSES, STATUS_LABEL } from '../domain/requestStatus.js';
+import { formatMsk } from '../domain/norms.js';
+import { extractPhotos } from '../domain/photos.js';
 import { describeError } from '../max/client.js';
 import { btn, type Button } from '../max/keyboard.js';
 import type { ParsedEvent } from '../webhook/parser.js';
 import { IDLE, type ApartmentInfo, type BotStore, type HouseInfo, type OrgInfo, type RequestInfo, type Session } from './store.js';
 
 /**
- * Сценарии бота.
+ * Чат-бот — «входная дверь» сервиса (решение команды 26.09):
+ *   1. жилец пишет адрес, бот проверяет его по справочнику и честно говорит, нашёл ли дом;
+ *   2. после привязки квартиры — две кнопки: «Приложение с заявками» и «Сменить адрес»;
+ *   3. подача заявки с фото, список, отзыв, «решена / не решена», жалоба в ГЖИ — в мини-приложении.
+ * Бот сам пишет жильцу, только когда истёк срок по заявке (мини-приложение не умеет присылать
+ * уведомления), и на «запах газа» сразу даёт памятку 104/112 — туда нельзя отправлять в приложение.
  *
- * Онбординг (этап 4): адрес → подтверждение дома → номер квартиры → подъезд (можно пропустить).
- * Заявка (этап 5): описание текстом → категория (сама или кнопками) → превью → «Отправить» →
- *   номер REQ-ГГГГ-NNNNN, ответственная организация и нормативный срок. После срока бот сам
- *   спрашивает, решена ли проблема, и при «нет» даёт готовый текст жалобы в ГЖИ.
- *
- * Состояние — в user_sessions (переживает рестарт). Все ответы — обычными сообщениями:
- * всплывающие уведомления на кнопки видны не во всех клиентах MAX.
- *
- * Состояния: idle · onb.address · onb.apartment · onb.entrance · req.describe · req.category · req.confirm
+ * Состояние — в user_sessions (переживает рестарт). Состояния: idle · onb.address · onb.apartment · onb.entrance
  */
 
 export interface BotIO {
   send(chatId: string, text: string, keyboard?: Button[][]): Promise<void>;
   /** Короткий ответ на нажатие (снимает «часики» на телефоне). Ошибки глотает. */
   answer(callbackId: string, notification: string): Promise<void>;
-  /** Отправить фото по токенам MAX (например, чтобы жилец приложил их к жалобе). */
+  /** Отправить фото по токенам MAX. */
   sendPhotos?(chatId: string, text: string, tokens: string[]): Promise<void>;
 }
 
 export interface BotOptions {
-  /** MOCK_AUTO_STATUS_CHANGE: статусы «принята» / «в работе» по времени (ТЗ 5.2.4). */
-  demoStatuses?: boolean;
   /** DEMO_DUE_MINUTES: напоминание через N минут вместо нормативного срока — чтобы показать сценарий просрочки. */
   demoDueMinutes?: number;
   /** Часы — подменяются в тестах. */
   now?: () => Date;
   /**
-   * Ссылка «Открыть в приложении» со входом для этого пользователя (path — экран, например requests/<id>).
-   * Нет PUBLIC_BASE_URL — кнопки не будет.
+   * Ссылка на мини-приложение со входом для этого пользователя (path — экран, например requests/<id>).
+   * Запасной путь, если MAX не примет кнопку open_app. Нет PUBLIC_BASE_URL — ссылки нет.
    */
   appLink?: (maxUserId: string, path?: string) => string | undefined;
   /**
@@ -50,8 +42,6 @@ export interface BotOptions {
    * undefined — бот ещё не проверил токен или мини-приложение не подключено: тогда кнопка-ссылка.
    */
   openApp?: () => { webApp: string; contactId?: number } | undefined;
-  /** Скачивание фото заявки на постоянный диск (после подачи). */
-  photoStorage?: { download(url: string, id: string): Promise<string | null> };
 }
 
 /** Экран мини-приложения → start_param (только латиница, цифры, «_» и «-»). */
@@ -72,27 +62,25 @@ const P = {
   street: 'onb:street:', // + название улицы — выбрана улица из списка
   entrance: 'onb:ent:', // + номер подъезда | skip
   retry: 'onb:retry',
-  apt: 'menu:apt',
-  relink: 'menu:relink',
-  request: 'menu:request', // «Подать заявку»
-  list: 'menu:list', // «Мои заявки»
-  cat: 'req:cat:', // + категория
-  send: 'req:send',
-  recat: 'req:recat',
-  addPhoto: 'req:photo',
-  cancel: 'req:cancel',
-  solved: 'req:solved:', // + id заявки
-  unsolved: 'req:unsolved:', // + id заявки
-  withdraw: 'req:withdraw', // «Отозвать заявку» — выбор из открытых
-  withdrawPick: 'req:wd:', // + id — подтвердить отзыв
-  withdrawYes: 'req:wdok:', // + id — отозвать
+  relink: 'menu:relink', // «Сменить адрес»
+  keep: 'menu:keep', // «Оставить прежний адрес»
   ping: 'debug:ping',
 } as const;
 
+const APP_BUTTON = 'Приложение с заявками';
+const RELINK_BUTTON = 'Сменить адрес';
 const ASK_ADDRESS = 'Напишите адрес вашего дома — улицу и номер.';
+const IN_APP =
+  'Заявки подаются в приложении: там можно описать проблему, приложить фото и следить за сроком. Нажмите «Приложение с заявками».';
+const GAS =
+  'Запах газа — это опасно, здесь важны минуты.\n\n' +
+  'Не включайте и не выключайте свет и электроприборы, не пользуйтесь огнём. Откройте окна, выйдите из помещения и оттуда позвоните в газовую службу по номеру 104 или 112.\n\n' +
+  'Заявку о газе через сервис не оформляем: её должна сразу принять аварийная газовая служба.';
+const MAX_BUTTONS = 16;
 
 /** Улица без типа: «пр-кт Ибрагимова» → «Ибрагимова». */
-const bareStreet = (street: string) => street.replace(/^(ул\.|пер\.|тер\.|пр-кт|б-р|пр\.|ш\.|пл\.|наб\.) /, '').replace(/ (пер\.|ул\.)$/, '');
+const bareStreet = (street: string) =>
+  street.replace(/^(ул\.|пер\.|тер\.|пр-кт|б-р|пр\.|ш\.|пл\.|наб\.) /, '').replace(/ (пер\.|ул\.)$/, '');
 
 /** Пример адреса из справочника (улица с наибольшим числом домов) — подсказка всегда про существующий дом. */
 function exampleAddress(houses: HouseInfo[]): string | null {
@@ -106,41 +94,19 @@ function exampleAddress(houses: HouseInfo[]): string | null {
 const plural = (n: number, one: string, few: string, many: string) =>
   n % 10 === 1 && n % 100 !== 11 ? one : n % 10 >= 2 && n % 10 <= 4 && (n % 100 < 12 || n % 100 > 14) ? few : many;
 
-/** «Авиастроительный, Вахитовский, Кировский и Московский районы». */
+/** «Авиастроительный, Вахитовский, Кировский и Московский районы Казани». */
 function districtsLine(houses: HouseInfo[]): string {
   const d = [...new Set(houses.map((h) => h.district).filter((x): x is string => !!x))].sort();
   if (d.length === 0) return 'Казани';
   if (d.length === 1) return `${d[0]} район Казани`;
   return `${d.slice(0, -1).join(', ')} и ${d.at(-1)} районы Казани`;
 }
-const ASK_PROBLEM =
-  'Опишите проблему одним сообщением — что случилось и где.\nНапример: «Течёт батарея в комнате» или «Не горит свет на 3 этаже».';
-const TEST_MODE =
-  'Бот работает в тестовом режиме: заявка сохранена здесь, но в УК автоматически пока не передаётся — для этого УК должна подключиться к сервису.';
-const GAS =
-  'Запах газа — это опасно, здесь важны минуты.\n\n' +
-  'Не включайте и не выключайте свет и электроприборы, не пользуйтесь огнём. Откройте окна, выйдите из помещения и оттуда позвоните в газовую службу по номеру 104 или 112.\n\n' +
-  'Заявку о газе через бота не оформляем: её должна сразу принять аварийная газовая служба.';
-const MAX_BUTTONS = 16;
-const LIST_LIMIT = 5;
-const MIN_DESCRIPTION = 5;
-const MAX_DESCRIPTION = 1000;
 
 const chunk = <T>(arr: T[], n: number): T[][] => {
   const out: T[][] = [];
   for (let i = 0; i < arr.length; i += n) out.push(arr.slice(i, i + n));
   return out;
 };
-
-function menuKeyboard(): Button[][] {
-  return [
-    [btn.callback('Подать заявку', P.request)],
-    [btn.callback('Мои заявки', P.list)],
-    [btn.callback('Моя квартира', P.apt), btn.callback('Другая квартира', P.relink)],
-  ];
-}
-
-const cancelKeyboard = (): Button[][] => [[btn.callback('Отмена', P.cancel)]];
 
 /** Название организации с честной пометкой о качестве данных. */
 function orgName(o: OrgInfo): string {
@@ -167,30 +133,6 @@ function apartmentLine(a: ApartmentInfo): string {
   return `${formatAddress(a.house)}, кв. ${a.number}${a.entrance ? `, подъезд ${a.entrance}` : ''}`;
 }
 
-/** Кому уйдёт заявка — для превью, до создания. */
-function responsibleLine(norm: Norm, house: HouseInfo): string {
-  if (norm.orgType === 'TKO') return 'региональный оператор по вывозу мусора (ТКО)';
-  return house.manager ? orgName(house.manager) : 'управляющая компания дома (нет в справочнике)';
-}
-
-function normLines(norm: Norm, dueAt?: Date): string[] {
-  return [
-    dueAt ? `Срок по нормативу: до ${formatMsk(dueAt)} (МСК)` : `Срок по нормативу: ${norm.hours ? hoursText(norm.hours) : `${norm.workingDays} рабочих дней`}`,
-    `Что должно произойти: ${norm.what}`,
-    `Основание: ${norm.ref}`,
-  ];
-}
-
-function hoursText(h: number): string {
-  if (h % 24 === 0) {
-    const d = h / 24;
-    return `${d} ${d === 1 ? 'сутки' : 'суток'}`;
-  }
-  return `${h} ${h === 1 ? 'час' : h < 5 ? 'часа' : 'часов'}`;
-}
-
-const short = (s: string, n: number) => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
-
 /** Номер квартиры из свободного ввода: «42», «кв 42», «квартира 42а». */
 export function parseApartmentNumber(text: string): string | null {
   const t = text.toLowerCase().replace(/ё/g, 'е').replace(/(квартира|кв\.?|№)/g, ' ').replace(/\s+/g, '').trim();
@@ -205,32 +147,42 @@ export function createBot(deps: { store: BotStore; io: BotIO; logger: Logger; op
 
   const setState = (userId: string, s: Session) => store.setSession(userId, s);
 
-  /** Меню с кнопкой «Открыть в приложении» сверху (если мини-приложение доступно). */
-  function menuWithApp(userId: string, label: string, path?: string, extra: Button[][] = []): Button[][] {
+  /** Кнопка мини-приложения: внутри MAX — open_app; запасной путь — ссылка со входом (см. router.ts). */
+  function appButton(userId: string, label: string, path?: string): Button | null {
     const url = opts.appLink?.(userId, path);
     const app = opts.openApp?.();
-    // Внутри MAX — кнопка мини-приложения; ссылка со входом остаётся запасной (см. router.ts).
     if (app) {
       const payload = appPayload(path);
-      return [[btn.openApp(label, { ...app, ...(payload ? { payload } : {}), ...(url ? { fallbackUrl: url } : {}) })], ...extra, ...menuKeyboard()];
+      return btn.openApp(label, { ...app, ...(payload ? { payload } : {}), ...(url ? { fallbackUrl: url } : {}) });
     }
-    return url ? [[btn.link(label, url)], ...extra, ...menuKeyboard()] : [...extra, ...menuKeyboard()];
+    return url ? btn.link(label, url) : null;
   }
 
-  // ─── онбординг ───────────────────────────────────────────────────────────
+  /** Главное меню — ровно две кнопки: «Приложение с заявками» и «Сменить адрес». */
+  function mainKeyboard(userId: string): Button[][] {
+    const app = appButton(userId, APP_BUTTON);
+    return [...(app ? [[app]] : []), [btn.callback(RELINK_BUTTON, P.relink)]];
+  }
 
-  async function askAddress(ev: ParsedEvent, prefix?: string, pending?: string) {
-    await setState(ev.userId, { state: 'onb.address', data: pending ? { pending } : {} });
+  async function home(ev: ParsedEvent, text: string) {
+    const hasApp = !!appButton(ev.userId, APP_BUTTON);
+    await io.send(ev.chatId, hasApp ? text : `${text}\n\nПриложение сейчас недоступно — попробуйте чуть позже.`, mainKeyboard(ev.userId));
+  }
+
+  // ─── привязка квартиры ───────────────────────────────────────────────────
+
+  async function askAddress(ev: ParsedEvent, prefix?: string, keyboard?: Button[][]) {
+    await setState(ev.userId, { state: 'onb.address', data: {} });
     const ex = exampleAddress(await store.listHouses());
     const ask = ex ? `${ASK_ADDRESS}\nНапример: ${ex}` : ASK_ADDRESS;
-    await io.send(ev.chatId, prefix ? `${prefix}\n\n${ask}` : ask);
+    await io.send(ev.chatId, prefix ? `${prefix}\n\n${ask}` : ask, keyboard);
   }
 
   async function confirmHouse(ev: ParsedEvent, house: HouseInfo, data: Session['data'], prefix?: string) {
     await setState(ev.userId, { state: 'onb.address', data: { ...data, houseId: house.id } });
     const lines = [
       ...(prefix ? [prefix, ''] : []),
-      'Нашёл дом:',
+      'Нашёл ваш дом в справочнике:',
       formatAddress(house),
       ukLine(house),
       ...(house.verified ? [] : ['', 'Справочник домов работает в тестовом режиме.']),
@@ -273,16 +225,15 @@ export function createBot(deps: { store: BotStore; io: BotIO; logger: Logger; op
       return offerHouses(ev, `Какой номер дома на ${r.street}? Выберите или напишите:`, r.houses);
     }
 
-    // Улица не найдена — не тупик: объясняем почему и даём выбрать улицу кнопкой.
-    // Кнопками — улицы, где больше всего домов: по алфавиту первые 16 из сотни ничего не дают.
+    // Адреса нет в справочнике — говорим об этом прямо и даём выбрать улицу кнопкой.
     const count = new Map<string, number>();
     for (const h of houses) count.set(h.street, (count.get(h.street) ?? 0) + 1);
     const streets = [...count.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).slice(0, 10).map(([st]) => st);
     const looksLikeProblem = !parseAddressQuery(text).houseNumber && text.trim().split(/\s+/).length >= 2;
     const ex = exampleAddress(houses);
     const lines = [
-      'Не нашёл такой адрес в справочнике.',
-      `Сейчас в нём ${houses.length} ${plural(houses.length, 'дом', 'дома', 'домов')}: ${districtsLine(houses)}. Бот работает в тестовом режиме.`,
+      'Такого адреса нет в справочнике.',
+      `Сейчас в нём ${houses.length} ${plural(houses.length, 'дом', 'дома', 'домов')}: ${districtsLine(houses)}. Сервис работает в тестовом режиме.`,
       '',
       `Проверьте написание${ex ? ` (например: ${ex})` : ''} или выберите улицу:`,
     ];
@@ -292,18 +243,17 @@ export function createBot(deps: { store: BotStore; io: BotIO; logger: Logger; op
 
   async function onHouseChosen(ev: ParsedEvent, houseId: string, session: Session) {
     const house = await store.getHouse(houseId);
-    const pending = session.data.pending;
-    if (!house) return askAddress(ev, 'Этот дом больше не найден в справочнике.', pending);
+    if (!house) return askAddress(ev, 'Этот дом больше не найден в справочнике.');
     const apartment = session.data.apartment;
-    if (apartment) return askEntrance(ev, house, apartment, pending);
-    await setState(ev.userId, { state: 'onb.apartment', data: { houseId, pending } });
+    if (apartment) return askEntrance(ev, house, apartment);
+    await setState(ev.userId, { state: 'onb.apartment', data: { houseId } });
     await io.send(ev.chatId, `${formatAddress(house)}\n\nНапишите номер квартиры, например: 42`);
   }
 
-  async function askEntrance(ev: ParsedEvent, house: HouseInfo, apartment: string, pending?: string) {
+  async function askEntrance(ev: ParsedEvent, house: HouseInfo, apartment: string) {
     const n = house.entrances ?? 0;
-    if (n < 2 || n > 12) return finish(ev, house.id, apartment, null, pending);
-    await setState(ev.userId, { state: 'onb.entrance', data: { houseId: house.id, apartment, pending } });
+    if (n < 2 || n > 12) return finish(ev, house.id, apartment, null);
+    await setState(ev.userId, { state: 'onb.entrance', data: { houseId: house.id, apartment } });
     const buttons = Array.from({ length: n }, (_, i) => btn.callback(String(i + 1), `${P.entrance}${i + 1}`));
     await io.send(ev.chatId, `Квартира ${apartment}. В каком подъезде? Это поможет УК быстрее найти вас.`, [
       ...chunk(buttons, 4),
@@ -311,271 +261,52 @@ export function createBot(deps: { store: BotStore; io: BotIO; logger: Logger; op
     ]);
   }
 
-  async function finish(ev: ParsedEvent, houseId: string, apartment: string, entrance: number | null, pending?: string) {
+  async function finish(ev: ParsedEvent, houseId: string, apartment: string, entrance: number | null) {
     await store.saveApartment(ev.userId, { houseId, number: apartment, entrance });
     await setState(ev.userId, { ...IDLE, data: {} });
     const a = await store.getApartment(ev.userId);
     if (!a) throw new Error('квартира не сохранилась');
     log.info({ userId: ev.userId, house: a.house.code }, 'bot: квартира привязана');
-    const lines = ['Готово! Квартира привязана:', apartmentLine(a), ukLine(a.house), ...contactsLines(a.house)];
-    if (!pending) return io.send(ev.chatId, lines.join('\n'), menuKeyboard());
-    // Жилец начал с описания проблемы — возвращаемся к нему, не заставляя писать заново.
-    await io.send(ev.chatId, lines.join('\n'));
-    return takeDescription(ev, pending, a);
-  }
-
-  // ─── заявка ──────────────────────────────────────────────────────────────
-
-  async function startRequest(ev: ParsedEvent) {
-    const a = await store.getApartment(ev.userId);
-    if (!a) return askAddress(ev, 'Чтобы подать заявку, сначала привяжем квартиру — это нужно один раз.');
-    await setState(ev.userId, { state: 'req.describe', data: {} });
-    await io.send(ev.chatId, ASK_PROBLEM, cancelKeyboard());
-  }
-
-  async function takeDescription(ev: ParsedEvent, text: string, a: ApartmentInfo, photos: PhotoRef[] = []) {
-    const description = text.replace(/\s+/g, ' ').trim().slice(0, MAX_DESCRIPTION);
-    if (description.replace(/\s/g, '').length < MIN_DESCRIPTION) {
-      await setState(ev.userId, { state: 'req.describe', data: photos.length ? { photos } : {} });
-      return io.send(ev.chatId, `Опишите, пожалуйста, чуть подробнее.\n\n${ASK_PROBLEM}`, cancelKeyboard());
-    }
-    const category = detectCategory(description);
-    if (category === 'gas') {
-      await setState(ev.userId, { ...IDLE, data: {} });
-      log.info({ userId: ev.userId }, 'bot: сообщение о газе — отправлена памятка');
-      return io.send(ev.chatId, GAS, menuKeyboard());
-    }
-    if (!category) return askCategory(ev, description, 'Не смог сам определить, к чему относится проблема. Выберите категорию:', photos);
-    return preview(ev, a, description, category, photos);
-  }
-
-  async function askCategory(ev: ParsedEvent, description: string, intro: string, photos: PhotoRef[] = []) {
-    await setState(ev.userId, { state: 'req.category', data: { pending: description, ...(photos.length ? { photos } : {}) } });
-    const buttons = CATEGORY_ORDER.map((c) => btn.callback(NORMS[c].title, P.cat + c));
-    await io.send(ev.chatId, `${intro}\n\n«${short(description, 200)}»`, [...chunk(buttons, 2), ...cancelKeyboard()]);
-  }
-
-  async function preview(
-    ev: ParsedEvent,
-    a: ApartmentInfo,
-    description: string,
-    category: Exclude<RequestCategory, 'gas'>,
-    photos: PhotoRef[] = [],
-    note?: string,
-  ) {
-    await setState(ev.userId, { state: 'req.confirm', data: { pending: description, category, ...(photos.length ? { photos } : {}) } });
-    const norm = NORMS[category];
-    const lines = [
-      ...(note ? [note, ''] : []),
-      'Проверьте заявку:',
-      '',
-      `Адрес: ${apartmentLine(a)}`,
-      `Проблема: ${description}`,
-      `Категория: ${norm.title}`,
-      ...(photos.length ? [`Фото: ${photos.length}`] : []),
-      `Кому: ${responsibleLine(norm, a.house)}`,
-      ...normLines(norm),
-    ];
-    await io.send(ev.chatId, lines.join('\n'), [
-      [btn.callback('Отправить', P.send, 'positive')],
-      ...(photos.length < MAX_PHOTOS ? [[btn.callback(photos.length ? 'Добавить ещё фото' : 'Добавить фото', P.addPhoto)]] : []),
-      [btn.callback('Другая категория', P.recat), btn.callback('Отмена', P.cancel)],
-    ]);
-  }
-
-  /** Фото пришли сообщением: добавляем к черновику и возвращаем жильца на его шаг. */
-  async function onPhotos(ev: ParsedEvent, incoming: PhotoRef[], text: string, session: Session, a: ApartmentInfo) {
-    const had = session.data.photos ?? [];
-    const photos = [...had, ...incoming].slice(0, MAX_PHOTOS);
-    const dropped = had.length + incoming.length - photos.length;
-    const added = `Фото добавлено (${photos.length} из ${MAX_PHOTOS}).${dropped > 0 ? ` Лишние ${dropped} не приложены: не больше ${MAX_PHOTOS} фото к заявке.` : ''}`;
-    // Подпись к фото — это описание проблемы
-    if (text) return takeDescription(ev, text, a, photos);
-    const { pending, category } = session.data;
-    if (session.state === 'req.confirm' && pending && category && category !== 'gas') return preview(ev, a, pending, category, photos, added);
-    if (session.state === 'req.category' && pending) return askCategory(ev, pending, `${added}\nВыберите категорию:`, photos);
-    await setState(ev.userId, { state: 'req.describe', data: { photos } });
-    await io.send(ev.chatId, `${added}\nТеперь опишите проблему одним сообщением — фото приложу к заявке.`, cancelKeyboard());
-  }
-
-  async function submit(ev: ParsedEvent, session: Session) {
-    const { pending, category } = session.data;
-    if (session.state !== 'req.confirm' || !pending || !category || category === 'gas') {
-      return io.send(ev.chatId, 'Эта заявка уже отправлена или отменена.', menuKeyboard());
-    }
-    const a = await store.getApartment(ev.userId);
-    if (!a) return askAddress(ev, 'Квартира не привязана — начнём с адреса.', pending);
-    const norm = NORMS[category];
-    const now = clock();
-    // Сначала создаём, потом сбрасываем черновик: при сбое базы описание не теряется и «Отправить» можно нажать снова.
-    // Двойное нажатие не создаст вторую заявку: события пользователя идут строго по очереди (см. handle),
-    // и второе нажатие увидит уже сброшенное состояние.
-    const photos = session.data.photos ?? [];
-    const r = await store.createRequest(ev.userId, {
-      category, description: pending, address: apartmentLine(a), orgType: norm.orgType, dueAt: computeDueAt(norm, now), photos,
-    });
-    await setState(ev.userId, { ...IDLE, data: {} });
-    log.info({ userId: ev.userId, number: r.number, category }, `bot: заявка ${r.number} создана (${category})`);
-
-    const m = a.house.manager;
-    const urgent = (norm.hours ?? Infinity) <= 2;
-    const lines = [
-      `Заявка ${r.number} зарегистрирована.`,
-      '',
-      `Проблема: ${r.description}`,
-      ...(r.photos.length ? [`Фото: ${r.photos.length} — приложены к заявке`] : []),
-      `Ответственный: ${r.org ? orgName(r.org) : responsibleLine(norm, a.house)}`,
-      ...normLines(norm, r.dueAt),
-      '',
-      opts.demoDueMinutes
-        ? `Демо-режим: напомню о заявке через ${opts.demoDueMinutes} мин, чтобы показать, что бот делает после срока.`
-        : 'Если срок пройдёт, а проблема останется, — я напомню и помогу составить жалобу в Госжилинспекцию.',
-      '',
-      TEST_MODE,
-      ...(urgent
-        ? [
-            m?.verified && m.dispatcherPhone
-              ? `Если авария (заливает, искрит) — звоните в аварийно-диспетчерскую службу: ${m.dispatcherPhone}.`
-              : 'Если авария (заливает, искрит) — звоните в аварийно-диспетчерскую службу вашей УК, а если не дозвонились — 112.',
-          ]
-        : []),
-    ];
-    await io.send(ev.chatId, lines.join('\n'), menuWithApp(ev.userId, 'Заявка в приложении', `requests/${r.id}`));
-    await savePhotoFiles(r.photos);
-  }
-
-  /** Скачать фото заявки на диск: после ответа жильцу, ошибки не мешают заявке (файл останется по ссылке MAX). */
-  async function savePhotoFiles(photos: Array<{ id: string; url?: string }>) {
-    if (!opts.photoStorage) return;
-    await Promise.all(
-      photos.map(async (p) => {
-        if (!p.url) return;
-        const file = await opts.photoStorage!.download(p.url, p.id);
-        if (file) await store.setPhotoFile(p.id, file);
-      }),
-    );
-  }
-
-  async function listRequests(ev: ParsedEvent) {
-    const list = await store.listRequests(ev.userId, LIST_LIMIT);
-    if (list.length === 0) {
-      return io.send(ev.chatId, 'Заявок пока нет. Чтобы подать, просто опишите проблему сообщением.', menuKeyboard());
-    }
-    const now = clock();
-    const blocks = list.map((r) => {
-      const shown = effectiveStatus(r, now, !!opts.demoStatuses);
-      const demoMark = shown !== r.status ? ' (демо)' : '';
-      const open = OPEN_STATUSES.includes(shown);
-      const due = !open ? '' : r.dueAt <= now ? ` · срок истёк ${formatMsk(r.dueAt)}` : ` · срок до ${formatMsk(r.dueAt)}`;
-      const title = r.category === 'gas' ? 'Газ' : NORMS[r.category].title;
-      const ph = r.photos.length ? ` · фото: ${r.photos.length}` : '';
-      return [`${r.number} · ${title}${ph}`, `«${short(r.description, 80)}»`, `Статус: ${STATUS_LABEL[shown]}${demoMark}${due}`].join('\n');
-    });
-    const head = list.length === LIST_LIMIT ? `Последние ${LIST_LIMIT} заявок:` : 'Ваши заявки:';
-    const anyOpen = list.some((r) => isOpen(r.status));
-    await io.send(
-      ev.chatId,
-      [head, ...blocks].join('\n\n'),
-      menuWithApp(ev.userId, 'Открыть в приложении', undefined, anyOpen ? [[btn.callback('Отозвать заявку', P.withdraw)]] : []),
-    );
-  }
-
-  // ─── отзыв заявки: выбор → подтверждение → отзыв ────────────────────────
-
-  async function withdrawChoose(ev: ParsedEvent) {
-    const open = (await store.listRequests(ev.userId, 20)).filter((r) => isOpen(r.status)).slice(0, 8);
-    if (open.length === 0) return io.send(ev.chatId, 'Открытых заявок нет — отзывать нечего.', menuKeyboard());
-    const title = (r: RequestInfo) => (r.category === 'gas' ? 'Газ' : NORMS[r.category].title);
-    await io.send(ev.chatId, 'Какую заявку отозвать?', [
-      ...open.map((r) => [btn.callback(`${r.number.replace(/^REQ-\d{4}-0*/, '№ ')} · ${title(r)}`, P.withdrawPick + r.id)]),
-      [btn.callback('Не отзывать', P.list)],
-    ]);
-  }
-
-  async function withdrawConfirm(ev: ParsedEvent, id: string) {
-    const r = await store.getRequest(ev.userId, id);
-    if (!r) return io.send(ev.chatId, 'Заявка не найдена.', menuKeyboard());
-    if (!isOpen(r.status)) return io.send(ev.chatId, `Заявка ${r.number} уже закрыта (${STATUS_LABEL[r.status]}).`, menuKeyboard());
-    await io.send(
-      ev.chatId,
-      `Отозвать заявку ${r.number}?\n«${short(r.description, 200)}»\n\nЭто действие нельзя отменить: если проблема вернётся, подайте новую заявку.`,
-      [[btn.callback('Да, отозвать', P.withdrawYes + r.id, 'negative')], [btn.callback('Нет, оставить', P.list)]],
-    );
-  }
-
-  async function withdraw(ev: ParsedEvent, id: string) {
-    const res = await store.cancelRequest(ev.userId, id);
-    if (res === 'not_found') return io.send(ev.chatId, 'Заявка не найдена.', menuKeyboard());
-    const r = await store.getRequest(ev.userId, id);
-    if (res === 'closed') return io.send(ev.chatId, `Заявка ${r?.number ?? ''} уже закрыта — отзывать не нужно.`, menuKeyboard());
-    log.info({ userId: ev.userId, number: r?.number }, `bot: заявка ${r?.number} отозвана жильцом`);
-    await io.send(ev.chatId, `Заявка ${r?.number} отозвана. Напоминаний по ней больше не будет.\nЕсли проблема вернётся — просто опишите её снова.`, menuKeyboard());
-  }
-
-  async function onSolved(ev: ParsedEvent, id: string, solved: boolean) {
-    const r = await store.getRequest(ev.userId, id);
-    if (!r) return io.send(ev.chatId, 'Заявка не найдена.', menuKeyboard());
-    if (!isOpen(r.status)) {
-      return io.send(ev.chatId, `Заявка ${r.number} уже закрыта (${STATUS_LABEL[r.status]}).`, menuKeyboard());
-    }
-    if (solved) {
-      await store.setRequestStatus(ev.userId, id, 'completed');
-      log.info({ userId: ev.userId, number: r.number }, `bot: заявка ${r.number} закрыта жильцом`);
-      return io.send(ev.chatId, `Отлично! Заявка ${r.number} закрыта как решённая.`, menuKeyboard());
-    }
-    if (r.category === 'gas') return io.send(ev.chatId, GAS, menuKeyboard());
-    const norm = NORMS[r.category];
-    await io.send(
-      ev.chatId,
+    await home(
+      ev,
       [
-        `Жаль. По заявке ${r.number} можно пожаловаться в Государственную жилищную инспекцию Республики Татарстан.`,
+        'Готово! Квартира привязана:',
+        apartmentLine(a),
+        ukLine(a.house),
+        ...contactsLines(a.house),
         '',
-        'Ниже — готовый текст. Скопируйте его и заполните поля в квадратных скобках.',
-        'Важно: в тестовом режиме бот не передаёт заявки в УК. Жалоба имеет смысл, если вы обращались в УК сами — по телефону, письменно или через ГИС ЖКХ; укажите дату и способ.',
-        '',
-        'Подать жалобу можно через Госуслуги или ГИС ЖКХ (dom.gosuslugi.ru), либо письмом в ГЖИ.',
+        'Подать заявку с фото и следить за ней можно в приложении.',
       ].join('\n'),
     );
-    await io.send(
-      ev.chatId,
-      complaintText({
-        description: r.description,
-        address: `${r.house.fullAddress.split(',')[0]}, ${r.address}`,
-        orgName: r.org ? r.org.name : null,
-        norm,
-        createdAt: r.createdAt,
-        dueAt: r.dueAt,
-        photos: r.photos.length,
-      }),
-      menuKeyboard(),
-    );
-    const tokens = r.photos.map((ph) => ph.token).filter((t): t is string => !!t);
-    if (tokens.length && io.sendPhotos) {
-      try {
-        await io.sendPhotos(ev.chatId, `Фото к заявке ${r.number} — приложите их к жалобе:`, tokens);
-      } catch (err) {
-        log.warn(`bot: не удалось переслать фото заявки ${r.number} — ${describeError(err)}`);
-      }
-    }
   }
+
+  /** «Сменить адрес»: старая квартира остаётся, пока не привязана новая — есть кнопка вернуться. */
+  async function relink(ev: ParsedEvent) {
+    const a = await store.getApartment(ev.userId);
+    if (!a) return askAddress(ev);
+    await askAddress(ev, `Сейчас привязана квартира: ${apartmentLine(a)}.\nОна останется, пока вы не укажете новую.`, [
+      [btn.callback('Оставить прежний адрес', P.keep)],
+    ]);
+  }
+
+  // ─── напоминание о сроке ─────────────────────────────────────────────────
 
   async function remindOverdue(): Promise<number> {
     const now = clock();
     const demoMs = (opts.demoDueMinutes ?? 0) * 60_000;
     const due = await store.overdueRequests({ now, ...(demoMs ? { createdBefore: new Date(now.getTime() - demoMs) } : {}) });
     let sent = 0;
-    for (const { chatId, request: r } of due) {
+    for (const { chatId, maxUserId, request: r } of due) {
       // Сначала отмечаем, потом пишем: при сбое отправки напоминание потеряется, но не задвоится.
       if (!(await store.markReminded(r.id, now))) continue;
       if (!chatId) continue;
       try {
-        await io.send(chatId, reminderText(r, now), [
-          [btn.callback('Да, решена', P.solved + r.id, 'positive'), btn.callback('Нет, не решена', P.unsolved + r.id)],
-        ]);
+        const app = appButton(maxUserId, 'Открыть заявку', `requests/${r.id}`);
+        await io.send(chatId, reminderText(r, now), app ? [[app]] : undefined);
         sent++;
         log.info({ number: r.number }, `bot: напоминание по заявке ${r.number} отправлено`);
       } catch (err) {
-        log.warn({ number: r.number, err }, `bot: не удалось отправить напоминание по заявке ${r.number}`);
+        log.warn({ number: r.number }, `bot: не удалось отправить напоминание по заявке ${r.number} — ${describeError(err)}`);
       }
     }
     return sent;
@@ -586,28 +317,16 @@ export function createBot(deps: { store: BotStore; io: BotIO; logger: Logger; op
       r.dueAt <= now
         ? `Срок по заявке ${r.number} истёк ${formatMsk(r.dueAt)} (МСК).`
         : `Демо-напоминание по заявке ${r.number}: так бот напишет, когда истечёт нормативный срок (${formatMsk(r.dueAt)} МСК).`;
-    return [head, '', `Проблема: ${r.description}`, '', 'Проблема решена?'].join('\n');
-  }
-
-  // ─── прочие экраны ───────────────────────────────────────────────────────
-
-  async function showApartment(ev: ParsedEvent) {
-    const a = await store.getApartment(ev.userId);
-    if (!a) return askAddress(ev, 'Квартира ещё не привязана.');
-    const h = a.house;
-    const about = [h.yearBuilt && `${h.yearBuilt} г.`, h.floors && `${h.floors} эт.`, h.entrances && `${h.entrances} подъезд.`]
-      .filter(Boolean)
-      .join(', ');
-    const lines = [
-      'Ваша квартира:',
-      apartmentLine(a),
-      ...(about ? [`Дом: ${about}`] : []),
+    return [
+      head,
       '',
-      ukLine(h),
-      ...contactsLines(h),
-    ];
-    await io.send(ev.chatId, lines.join('\n'), menuWithApp(ev.userId, 'Открыть в приложении', 'apartment'));
+      `Проблема: ${r.description}`,
+      '',
+      'Проблема решена? Отметьте это в заявке в приложении. Если нет — там же готовый текст жалобы в Госжилинспекцию.',
+    ].join('\n');
   }
+
+  // ─── маршрутизация ───────────────────────────────────────────────────────
 
   async function start(ev: ParsedEvent, payload?: string) {
     const greeting =
@@ -620,111 +339,60 @@ export function createBot(deps: { store: BotStore; io: BotIO; logger: Logger; op
     const a = await store.getApartment(ev.userId);
     if (a) {
       await setState(ev.userId, { ...IDLE, data: {} });
-      return io.send(
-        ev.chatId,
-        `С возвращением! Ваша квартира:\n${apartmentLine(a)}\n\nЧтобы подать заявку, просто опишите проблему сообщением.`,
-        menuKeyboard(),
-      );
+      return home(ev, `С возвращением! Ваша квартира:\n${apartmentLine(a)}\n\n${IN_APP}`);
     }
-    await askAddress(ev, `${greeting}\n\nСначала привяжем вашу квартиру — это нужно один раз.`);
+    await askAddress(ev, `${greeting}\n\nСначала укажем ваш дом — это нужно один раз.`);
   }
-
-  async function help(ev: ParsedEvent) {
-    const a = await store.getApartment(ev.userId);
-    const lines = [
-      'Я помогаю подать заявку в управляющую компанию и слежу, чтобы вам ответили в срок.',
-      '',
-      '• Подать заявку — просто опишите проблему одним сообщением.',
-      '• «Мои заявки» — статусы и сроки; там же можно отозвать заявку.',
-      '• «Моя квартира» — адрес и управляющая компания.',
-      '• /start — начать сначала. Привязанная квартира и заявки сохранятся.',
-    ];
-    if (!a) return askAddress(ev, `${lines.join('\n')}\n\nСначала привяжем квартиру.`, (await store.getSession(ev.userId)).data.pending);
-    await io.send(ev.chatId, lines.join('\n'), menuKeyboard());
-  }
-
-  // ─── маршрутизация ───────────────────────────────────────────────────────
 
   async function onMessage(ev: ParsedEvent) {
     const text = (ev.text ?? '').trim();
-    const photos = extractPhotos(ev.attachments);
-    // Формат фото взят из открытых клиентов MAX, не из официальной документации: если «image» пришло,
-    // но разобрать не удалось, пишем в лог имена полей (без значений) — чтобы быстро поправить разбор.
-    const images = (ev.attachments ?? []).filter((x) => x.type === 'image');
-    if (images.length > photos.length) {
-      const keys = images.map((x) => Object.keys((x.payload ?? {}) as object).join(',') || 'нет payload').join(' | ');
-      log.warn(`bot: фото не разобрано — поля вложения: ${keys}`);
-    }
-    if (!text && photos.length === 0) {
-      return io.send(
-        ev.chatId,
-        hasNonPhoto(ev.attachments)
-          ? 'Видео, файлы и стикеры не принимаю. Пришлите фото или опишите проблему текстом.'
-          : 'Я понимаю текст, фото и кнопки. Напишите, пожалуйста, словами.',
-      );
-    }
     if (/^\/?(start|старт|начать|меню|menu)$/i.test(text)) return start(ev);
-    if (/^\/?(help|помощь|справка|\?)$/i.test(text)) return help(ev);
-    if (/^\/?(мои )?заявки$/i.test(text)) return listRequests(ev);
-    if (/^\/?отозвать( заявку)?$/i.test(text)) return withdrawChoose(ev);
 
     const session = await store.getSession(ev.userId);
-    const pending = session.data.pending;
+    const onboarding = session.state.startsWith('onb.');
+    const a = onboarding ? null : await store.getApartment(ev.userId);
 
-    if (photos.length) {
-      const apt = session.state.startsWith('onb.') ? null : await store.getApartment(ev.userId);
-      if (apt) return onPhotos(ev, photos, text, session, apt);
-      // Привязка квартиры ещё идёт или не начата: фото пока некуда приложить
-      await io.send(ev.chatId, 'Фото приложите к заявке чуть позже — сначала привяжем квартиру.');
-      if (!text) return;
+    // Запах газа — сразу памятка, в любом состоянии: здесь нельзя отправлять жильца в приложение.
+    if (text && detectCategory(text) === 'gas') {
+      return a ? home(ev, GAS) : io.send(ev.chatId, GAS);
     }
-    // «Отмена» словами: в черновике — отменить черновик, иначе — отозвать поданную заявку.
-    if (/^(отмена|отменить|отменить заявку)$/i.test(text)) {
-      if (session.state.startsWith('req.')) {
-        await setState(ev.userId, { ...IDLE, data: {} });
-        return io.send(ev.chatId, 'Заявка отменена.', menuKeyboard());
-      }
-      return withdrawChoose(ev);
+
+    if (!text) {
+      const photo = extractPhotos(ev.attachments).length > 0;
+      if (a) return home(ev, photo ? `Фото прикладываются к заявке в приложении.\n\n${IN_APP}` : IN_APP);
+      return io.send(ev.chatId, onboarding ? 'Напишите, пожалуйста, текстом.' : 'Сначала укажем ваш дом — напишите адрес текстом.');
     }
+
     if (session.state === 'onb.apartment') {
       const num = parseApartmentNumber(text);
       if (!num) return io.send(ev.chatId, 'Нужен номер квартиры цифрами, например: 42');
       const house = session.data.houseId ? await store.getHouse(session.data.houseId) : null;
-      if (!house) return askAddress(ev, 'Не удалось вспомнить выбранный дом.', pending);
-      return askEntrance(ev, house, num, pending);
+      if (!house) return askAddress(ev, 'Не удалось вспомнить выбранный дом.');
+      return askEntrance(ev, house, num);
     }
     if (session.state === 'onb.entrance' && session.data.houseId && session.data.apartment) {
-      if (/^(пропустить|не знаю|нет|-)$/i.test(text)) return finish(ev, session.data.houseId, session.data.apartment, null, pending);
+      if (/^(пропустить|не знаю|нет|-)$/i.test(text)) return finish(ev, session.data.houseId, session.data.apartment, null);
       const n = Number(text.replace(/\D/g, ''));
-      if (/^\s*(подъезд\s*)?\d{1,2}\s*$/i.test(text) && n >= 1) {
-        return finish(ev, session.data.houseId, session.data.apartment, n, pending);
-      }
+      if (/^\s*(подъезд\s*)?\d{1,2}\s*$/i.test(text) && n >= 1) return finish(ev, session.data.houseId, session.data.apartment, n);
     }
     if (session.state === 'onb.address' && session.data.houseId) {
       // Ответ словами на «Это ваш дом?»
       if (/^(да|ага|верно|точно|мой|да,? мой( дом)?)$/i.test(text)) return onHouseChosen(ev, session.data.houseId, session);
-      if (/^(нет|не мой|не тот)$/i.test(text)) return askAddress(ev, undefined, pending);
+      if (/^(нет|не мой|не тот)$/i.test(text)) return askAddress(ev);
     }
-    if (session.state === 'onb.address' || session.state === 'onb.entrance') return handleAddress(ev, text, session);
+    if (onboarding) return handleAddress(ev, text, session);
 
-    const a = await store.getApartment(ev.userId);
-    if (!a) {
-      // Без квартиры: адрес — в онбординг; похоже на проблему — запоминаем и просим адрес.
-      const r = matchHouse(text, await store.listHouses());
-      const category = r.kind === 'not_found' ? detectCategory(text) : null;
-      if (category === 'gas') return io.send(ev.chatId, GAS);
-      if (category) {
-        return askAddress(ev, 'Чтобы подать заявку, сначала привяжем квартиру — это нужно один раз. Описание проблемы я запомнил.', text);
-      }
-      return handleAddress(ev, text, session);
+    // Квартира привязана: всё остальное — в приложении. «Сменить адрес» можно и словами.
+    if (a) {
+      if (/^\/?(сменить|другой|новый) адрес$/i.test(text)) return relink(ev);
+      return home(ev, IN_APP);
     }
-
-    // С квартирой: любой осмысленный текст — описание проблемы (в том числе вместо нажатия кнопок).
-    const words = text.split(/\s+/).length;
-    if (session.state === 'idle' && words < 3 && !detectCategory(text)) {
-      return io.send(ev.chatId, `Чтобы подать заявку, опишите проблему одним сообщением.\nНапример: «Течёт батарея в комнате».`, menuKeyboard());
+    // Квартиры нет: любой текст — попытка ввести адрес
+    const r = matchHouse(text, await store.listHouses());
+    if (r.kind === 'not_found' && detectCategory(text)) {
+      return askAddress(ev, 'Чтобы подать заявку, сначала укажем ваш дом — это нужно один раз. Саму заявку подадите в приложении.');
     }
-    return takeDescription(ev, text, a, session.state.startsWith('req.') ? (session.data.photos ?? []) : []);
+    return handleAddress(ev, text, session);
   }
 
   async function onCallback(ev: ParsedEvent) {
@@ -735,58 +403,29 @@ export function createBot(deps: { store: BotStore; io: BotIO; logger: Logger; op
     if (p.startsWith(P.house)) return onHouseChosen(ev, p.slice(P.house.length), session);
     if (p.startsWith(P.street)) return handleAddress(ev, p.slice(P.street.length), session);
     if (p.startsWith(P.entrance)) {
-      const { houseId, apartment, pending } = session.data;
+      const { houseId, apartment } = session.data;
       if (session.state !== 'onb.entrance' || !houseId || !apartment) {
         return askAddress(ev, 'Эта кнопка устарела — начнём привязку заново.');
       }
       const v = p.slice(P.entrance.length);
-      return finish(ev, houseId, apartment, v === 'skip' ? null : Number(v) || null, pending);
+      return finish(ev, houseId, apartment, v === 'skip' ? null : Number(v) || null);
     }
-    if (p === P.retry) return askAddress(ev, undefined, session.data.pending);
-    if (p === P.relink) return askAddress(ev);
-    if (p === P.apt) return showApartment(ev);
-    if (p === P.request) return startRequest(ev);
-    if (p === P.list) return listRequests(ev);
-
-    if (p.startsWith(P.cat)) {
-      const category = p.slice(P.cat.length) as RequestCategory;
-      const description = session.data.pending;
+    if (p === P.retry) return askAddress(ev);
+    if (p === P.relink) return relink(ev);
+    if (p === P.keep) {
       const a = await store.getApartment(ev.userId);
-      if (!(session.state === 'req.category' || session.state === 'req.confirm') || !description || !a || !(category in NORMS)) {
-        return io.send(ev.chatId, 'Эта кнопка устарела. Опишите проблему заново.', menuKeyboard());
-      }
-      return preview(ev, a, description, category as Exclude<RequestCategory, 'gas'>, session.data.photos ?? []);
-    }
-    if (p === P.recat) {
-      if (session.state !== 'req.confirm' || !session.data.pending) {
-        return io.send(ev.chatId, 'Эта кнопка устарела. Опишите проблему заново.', menuKeyboard());
-      }
-      return askCategory(ev, session.data.pending, 'Выберите категорию:', session.data.photos ?? []);
-    }
-    if (p === P.addPhoto) {
-      if (!session.state.startsWith('req.')) return io.send(ev.chatId, 'Эта кнопка устарела. Опишите проблему заново.', menuKeyboard());
-      const n = session.data.photos?.length ?? 0;
-      if (n >= MAX_PHOTOS) return io.send(ev.chatId, `К заявке уже приложено ${MAX_PHOTOS} фото — это максимум.`);
-      return io.send(
-        ev.chatId,
-        `Пришлите фото сюда, в чат — одно или несколько (ещё ${MAX_PHOTOS - n}). Я добавлю их к заявке и снова покажу её перед отправкой.`,
-      );
-    }
-    if (p === P.send) return submit(ev, session);
-    if (p === P.cancel) {
-      if (!session.state.startsWith('req.')) return io.send(ev.chatId, 'Нечего отменять.', menuKeyboard());
+      if (!a) return askAddress(ev);
       await setState(ev.userId, { ...IDLE, data: {} });
-      return io.send(ev.chatId, 'Заявка отменена.', menuKeyboard());
+      return home(ev, `Оставил прежний адрес: ${apartmentLine(a)}.`);
     }
-    if (p.startsWith(P.solved)) return onSolved(ev, p.slice(P.solved.length), true);
-    if (p.startsWith(P.unsolved)) return onSolved(ev, p.slice(P.unsolved.length), false);
-    if (p === P.withdraw) return withdrawChoose(ev);
-    if (p.startsWith(P.withdrawPick)) return withdrawConfirm(ev, p.slice(P.withdrawPick.length));
-    if (p.startsWith(P.withdrawYes)) return withdraw(ev, p.slice(P.withdrawYes.length));
     if (p === P.ping) return io.send(ev.chatId, 'Нажатие получено — кнопка работает ✅');
 
-    log.info({ payload: p }, 'bot: неизвестная кнопка');
-    await io.send(ev.chatId, 'Эта кнопка устарела. Напишите /start, чтобы начать заново.');
+    // Кнопки прежних версий («Мои заявки», «Отправить», «Да, решена»…) — теперь это в приложении.
+    log.info({ payload: p }, 'bot: кнопка прежней версии или неизвестная');
+    const a = await store.getApartment(ev.userId);
+    if (!a) return askAddress(ev, 'Эта кнопка устарела.');
+    await setState(ev.userId, { ...IDLE, data: {} });
+    await home(ev, 'Эта кнопка устарела: заявки, их статусы и отзыв теперь в приложении.');
   }
 
   async function route(ev: ParsedEvent): Promise<void> {
@@ -811,7 +450,7 @@ export function createBot(deps: { store: BotStore; io: BotIO; logger: Logger; op
         await io.send(
           ev.chatId,
           'Что-то пошло не так на нашей стороне. Попробуйте ещё раз — введённые данные сохранены.\nЕсли ошибка повторяется, напишите /start.',
-          menuKeyboard(),
+          mainKeyboard(ev.userId),
         );
       } catch (sendErr) {
         log.error(`bot: не удалось сообщить пользователю об ошибке — ${describeError(sendErr)}`);
@@ -820,7 +459,7 @@ export function createBot(deps: { store: BotStore; io: BotIO; logger: Logger; op
   }
 
   // События одного пользователя обрабатываем строго по очереди: вебхук отвечает 200 сразу,
-  // и два быстрых нажатия «Отправить» иначе прочитали бы одно и то же состояние.
+  // и два быстрых нажатия иначе прочитали бы одно и то же состояние.
   const chains = new Map<string, Promise<void>>();
   const handle = (ev: ParsedEvent): Promise<void> => {
     const prev = chains.get(ev.userId) ?? Promise.resolve();

@@ -1,6 +1,6 @@
 import { Button } from '@maxhub/max-ui';
 import { useState } from 'react';
-import type { RequestItem } from '../api';
+import { api, type RequestItem } from '../api';
 import { dateTime } from '../format';
 import { Field, orgName, StatusPill } from '../ui';
 import { Photos } from './Photos';
@@ -53,7 +53,78 @@ function CancelBlock({ onCancel }: { onCancel: () => Promise<string | null> }) {
   );
 }
 
-export function RequestDetails({ r, onCancel }: { r: RequestItem; onCancel: () => Promise<string | null> }) {
+/** «Не решена»: готовый текст жалобы в ГЖИ с кнопкой «Скопировать». */
+function ComplaintBlock({ id }: { id: string }) {
+  const [data, setData] = useState<{ text: string; where: string; note: string } | null>(null);
+  const [state, setState] = useState<'idle' | 'loading' | 'error'>('idle');
+  const [copied, setCopied] = useState(false);
+
+  async function load() {
+    setState('loading');
+    try {
+      setData(await api.complaint(id));
+      setState('idle');
+    } catch {
+      setState('error');
+    }
+  }
+  async function copy() {
+    if (!data) return;
+    try {
+      await navigator.clipboard.writeText(data.text);
+      setCopied(true);
+    } catch {
+      // В части встроенных браузеров буфер обмена недоступен — выделяем текст, чтобы скопировать вручную
+      const el = document.getElementById('complaint-text');
+      if (el) window.getSelection()?.selectAllChildren(el);
+    }
+  }
+
+  if (!data) {
+    return (
+      <div className="gutter">
+        <Button size="medium" variant="secondary" stretched loading={state === 'loading'} onClick={() => void load()}>
+          Не решена — жалоба в Госжилинспекцию
+        </Button>
+        {state === 'error' && <p className="note" style={{ margin: '8px 0 0' }}>Не удалось загрузить текст. Попробуйте ещё раз.</p>}
+      </div>
+    );
+  }
+  return (
+    <section className="card" aria-labelledby="complaint-title">
+      <div id="complaint-title" className="field__value" style={{ fontWeight: 600 }}>
+        Жалоба в Госжилинспекцию РТ
+      </div>
+      <p className="field__label" style={{ margin: '4px 0 0' }}>
+        Скопируйте текст и заполните поля в квадратных скобках. {data.note}
+      </p>
+      <div id="complaint-text" className="complaint">
+        {data.text}
+      </div>
+      <Button size="medium" stretched onClick={() => void copy()}>
+        {copied ? 'Скопировано' : 'Скопировать текст'}
+      </Button>
+      <p className="field__label" style={{ margin: '8px 0 0' }}>
+        {data.where}
+      </p>
+    </section>
+  );
+}
+
+export function RequestDetails({
+  r,
+  maxPhotos,
+  onCancel,
+  onResolve,
+  onChanged,
+}: {
+  r: RequestItem;
+  maxPhotos: number;
+  onCancel: () => Promise<string | null>;
+  onResolve: () => Promise<void>;
+  onChanged: () => void;
+}) {
+  const [resolving, setResolving] = useState(false);
   const open = r.can_cancel;
   return (
     <div className="stack">
@@ -73,7 +144,7 @@ export function RequestDetails({ r, onCancel }: { r: RequestItem; onCancel: () =
         <Field label="Ответственный">{r.org ? orgName(r.org) : 'Управляющая компания дома'}</Field>
       </section>
 
-      <Photos requestId={r.id} photos={r.photos} />
+      <Photos requestId={r.id} photos={r.photos} canAdd={r.can_cancel} max={maxPhotos} onChanged={onChanged} />
 
       <section className="card">
         <Field label={open ? (r.overdue ? 'Срок истёк' : 'Срок по нормативу') : 'Срок был'} negative={open && r.overdue}>
@@ -83,8 +154,25 @@ export function RequestDetails({ r, onCancel }: { r: RequestItem; onCancel: () =
         {r.norm && <Field label="Основание">{r.norm.ref}</Field>}
       </section>
 
-      {open && r.overdue && (
-        <p className="note">Бот пришлёт в чат вопрос «Проблема решена?», а если нет — поможет составить жалобу в Госжилинспекцию.</p>
+      {r.can_resolve && (
+        <div className="gutter">
+          <Button
+            size="medium"
+            stretched
+            loading={resolving}
+            onClick={async () => {
+              setResolving(true);
+              await onResolve();
+              setResolving(false);
+            }}
+          >
+            Проблема решена
+          </Button>
+        </div>
+      )}
+      {r.can_complain && <ComplaintBlock id={r.id} />}
+      {open && !r.overdue && (
+        <p className="note">Если срок пройдёт, а проблема останется, бот напомнит в чате, а здесь появится готовый текст жалобы в Госжилинспекцию.</p>
       )}
       {r.status === 'cancelled' && <p className="note">Заявка отозвана — напоминаний по ней не будет.</p>}
       {open && <CancelBlock onCancel={onCancel} />}

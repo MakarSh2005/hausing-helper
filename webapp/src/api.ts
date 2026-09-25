@@ -45,6 +45,8 @@ export interface RequestItem {
   norm: { what: string; ref: string } | null;
   address: string;
   photos: Array<{ id: string; available: boolean }>;
+  can_resolve: boolean;
+  can_complain: boolean;
 }
 
 export type AuthProblem = 'no_launch_data' | 'expired' | 'rejected';
@@ -163,21 +165,30 @@ async function get<T>(path: string, attempt = 0): Promise<T> {
   return (await res.json()) as T;
 }
 
-/** Отозвать заявку. already_closed — её уже закрыли (сервер вернёт актуальное состояние). */
-async function cancelRequest(id: string): Promise<{ ok: true; request: RequestItem } | { ok: false; request: RequestItem | null }> {
-  const res = await timedFetch(`/api/requests/${encodeURIComponent(id)}/cancel`, {
-    method: 'POST',
-    headers: token ? { authorization: `Bearer ${token}` } : {},
-  });
+/**
+ * Запрос с авторизацией для действий (POST): истекла сессия внутри MAX — входим заново и повторяем.
+ * Не повторяем при сетевой ошибке: иначе можно создать заявку дважды (сервер это отсекает, но зачем).
+ */
+async function authed(path: string, init: RequestInit = {}, retried = false): Promise<Response> {
+  const res = await timedFetch(path, { ...init, headers: { ...(init.headers ?? {}), ...(token ? { authorization: `Bearer ${token}` } : {}) } });
   if (res.status === 401) {
     token = null;
     saved.set(null);
-    if (initData()) {
+    if (!retried && initData()) {
       await login();
-      return cancelRequest(id);
+      return authed(path, init, true);
     }
     throw new AuthError('expired');
   }
+  return res;
+}
+
+const postJson = (path: string, body?: unknown) =>
+  authed(path, { method: 'POST', ...(body !== undefined ? { headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) } : {}) });
+
+/** Отозвать заявку. already_closed — её уже закрыли (сервер вернёт актуальное состояние). */
+async function cancelRequest(id: string): Promise<{ ok: true; request: RequestItem } | { ok: false; request: RequestItem | null }> {
+  const res = await postJson(`/api/requests/${encodeURIComponent(id)}/cancel`);
   if (res.status === 409) {
     const b = (await res.json().catch(() => null)) as { request: RequestItem | null } | null;
     return { ok: false, request: b?.request ?? null };
@@ -188,16 +199,66 @@ async function cancelRequest(id: string): Promise<{ ok: true; request: RequestIt
 
 /** Фото заявки как blob: картинки в <img> не отправляют заголовок авторизации. */
 async function photoBlob(requestId: string, photoId: string): Promise<Blob> {
-  const res = await timedFetch(`/api/requests/${encodeURIComponent(requestId)}/photos/${encodeURIComponent(photoId)}`, {
-    headers: token ? { authorization: `Bearer ${token}` } : {},
-  });
+  const res = await authed(`/api/requests/${encodeURIComponent(requestId)}/photos/${encodeURIComponent(photoId)}`);
   if (!res.ok) throw new NetworkError(`http ${res.status}`);
   return res.blob();
+}
+
+export interface Category {
+  id: string;
+  title: string;
+  what: string;
+  ref: string;
+  org_type: string;
+}
+export interface Catalog {
+  categories: Category[];
+  max_photos: number;
+  min_description: number;
+  max_description: number;
+}
+export type CreateError = 'no_apartment' | 'too_short' | 'bad_category' | 'gas';
+
+async function createRequest(body: { description: string; category: string }): Promise<{ ok: true; request: RequestItem } | { ok: false; error: CreateError }> {
+  const res = await postJson('/api/requests', body);
+  if (res.status === 200 || res.status === 201) return { ok: true, request: (await res.json()) as RequestItem };
+  const b = (await res.json().catch(() => null)) as { error?: CreateError } | null;
+  if (b?.error && res.status < 500) return { ok: false, error: b.error };
+  throw new NetworkError(`http ${res.status}`);
+}
+
+/** Загрузить одно фото (уже сжатое). limit/closed — сервер не принял, это не сетевая ошибка. */
+async function uploadPhoto(requestId: string, blob: Blob): Promise<'ok' | 'limit' | 'closed' | 'not_image'> {
+  const res = await authed(`/api/requests/${encodeURIComponent(requestId)}/photos`, {
+    method: 'POST',
+    headers: { 'content-type': blob.type || 'image/jpeg' },
+    body: blob,
+  });
+  if (res.status === 201) return 'ok';
+  const b = (await res.json().catch(() => null)) as { error?: string } | null;
+  if (b?.error === 'limit' || b?.error === 'closed' || b?.error === 'not_image') return b.error;
+  throw new NetworkError(`http ${res.status}`);
+}
+
+async function resolveRequest(id: string): Promise<RequestItem | null> {
+  const res = await postJson(`/api/requests/${encodeURIComponent(id)}/resolve`);
+  if (res.status === 409) return null;
+  if (!res.ok) throw new NetworkError(`http ${res.status}`);
+  return (await res.json()) as RequestItem;
 }
 
 export const api = {
   photo: photoBlob,
   cancel: cancelRequest,
+  create: createRequest,
+  uploadPhoto,
+  resolve: resolveRequest,
+  catalog: () => get<Catalog>('/api/catalog'),
+  complaint: (id: string) => get<{ text: string; where: string; note: string }>(`/api/requests/${encodeURIComponent(id)}/complaint`),
+  suggest: async (description: string) => {
+    const res = await postJson('/api/requests/suggest', { description });
+    return res.ok ? ((await res.json()) as { category: string | null; gas: boolean }) : { category: null, gas: false };
+  },
   me: () => get<{ apartment: Apartment | null }>('/api/me'),
   requests: () => get<{ items: RequestItem[] }>('/api/requests'),
   request: (id: string) => get<RequestItem>(`/api/requests/${encodeURIComponent(id)}`),

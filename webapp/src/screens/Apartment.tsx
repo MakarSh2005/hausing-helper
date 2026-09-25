@@ -9,9 +9,9 @@ export function Apartment(props: { apartment: Apt | null; onWriteBot: () => void
     return (
       <div className="state">
         <h1>Квартира не привязана</h1>
-        <p>Напишите боту адрес дома — это нужно один раз. После этого здесь появятся данные дома и управляющей компании.</p>
+        <p>Укажите адрес дома в чате с ботом — это нужно один раз. После этого здесь появятся данные дома и управляющей компании, и можно будет подавать заявки.</p>
         <Button size="medium" onClick={props.onWriteBot}>
-          Написать боту
+          Открыть чат с ботом
         </Button>
       </div>
     );
@@ -68,7 +68,7 @@ export function Apartment(props: { apartment: Apt | null; onWriteBot: () => void
       </section>
 
       {!h.data_verified && <p className="note">Справочник домов работает в тестовом режиме.</p>}
-      <p className="note">Чтобы привязать другую квартиру, нажмите «Другая квартира» в чате с ботом.</p>
+      <p className="note">Сменить адрес — кнопкой «Сменить адрес» в чате с ботом.</p>
     </div>
   );
 }
