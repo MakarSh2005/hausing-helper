@@ -255,6 +255,32 @@ describe('API мини-приложения', () => {
     clock.now -= 2 * 3_600_000;
   });
 
+  it('смена адреса в приложении: поиск по справочнику, проверка номера и подъезда, старые заявки с прежним адресом', async () => {
+    const t = tokenFor(ME);
+    const search = async (q: string) => (await (await call(`/api/houses/search?q=${encodeURIComponent(q)}`, { token: t })).json()) as { kind: string; houses: Array<{ id: string; address: string; entrances: number | null }>; apartment: string | null };
+    const found = await search('Бауманна 15 кв 7');
+    assert.equal(found.kind, 'found');
+    assert.equal(found.houses[0]!.address, 'ул. Баумана, д. 15');
+    assert.equal(found.apartment, '7');
+    assert.equal((await search('Ленина 5')).kind, 'not_found');
+    const street = await search('Баумана');
+    assert.equal(street.kind, 'need_number');
+    assert.ok(street.houses.length > 1);
+
+    store.apartments.set(ME, { houseId: HOUSES[1]!.id, number: '3', entrance: null });
+    const old = await store.createRequest(ME, { address: 'старый адрес, кв. 3', category: 'roof', description: 'Крыша', orgType: 'UK', dueAt: new Date(clock.now + 86_400_000) });
+    const put = (body: unknown) => call('/api/me/apartment', { method: 'PUT', token: t, body: JSON.stringify(body) });
+    assert.deepEqual(await (await put({ house_id: found.houses[0]!.id, number: 'сорок' })).json(), { error: 'bad_number' });
+    assert.deepEqual(await (await put({ house_id: 'нет-такого', number: '7' })).json(), { error: 'bad_house' });
+    assert.deepEqual(await (await put({ house_id: found.houses[0]!.id, number: '7', entrance: 20 })).json(), { error: 'bad_entrance' });
+    const ok = await put({ house_id: found.houses[0]!.id, number: 'кв. 7', entrance: 2 });
+    assert.equal(ok.status, 200);
+    const { apartment } = (await ok.json()) as { apartment: { address: string; number: string; entrance: number } };
+    assert.deepEqual([apartment.address, apartment.number, apartment.entrance], ['ул. Баумана, д. 15', '7', 2]);
+    assert.equal((await store.getRequest(ME, old.id))!.address, 'старый адрес, кв. 3', 'поданная заявка — с прежним адресом');
+    assert.equal((await call('/api/houses/search?q=x')).status, 401);
+  });
+
   it('лимит запросов на пользователя → 429', async () => {
     const t = tokenFor('99999');
     const codes: number[] = [];

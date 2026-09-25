@@ -2,27 +2,35 @@ import { useEffect, useState } from 'react';
 import type { Apartment, AppNotification, RequestItem } from './api';
 import { dateTime, phoneHref } from './format';
 
-// ─── шапка: аварийная служба + уведомления ────────────────────────────────
+// ─── шапка: уведомления; внизу экрана — номера аварийных служб ───────────
 
-export function Header(props: { apartment: Apartment | null; unread: number; onBell: () => void }) {
-  const [sos, setSos] = useState(false);
+export function Header(props: { unread: number; onBell: () => void }) {
+  return (
+    <div className="header">
+      <button className="bell" onClick={props.onBell} aria-label={props.unread ? `Уведомления: ${props.unread} новых` : 'Уведомления'}>
+        <svg width="22" height="22" viewBox="0 0 24 24" aria-hidden="true">
+          <path
+            d="M12 3a6 6 0 0 0-6 6v3.6L4.3 15.4A1 1 0 0 0 5.2 17h13.6a1 1 0 0 0 .9-1.6L18 12.6V9a6 6 0 0 0-6-6Zm0 18a2.5 2.5 0 0 0 2.4-2h-4.8a2.5 2.5 0 0 0 2.4 2Z"
+            fill="currentColor"
+          />
+        </svg>
+        {props.unread > 0 && <span className="bell__badge">{props.unread > 9 ? '9+' : props.unread}</span>}
+      </button>
+    </div>
+  );
+}
+
+/** Красная кнопка, закреплённая внизу экрана: видна на любом экране и при любой прокрутке. */
+export function EmergencyBar(props: { apartment: Apartment | null }) {
+  const [open, setOpen] = useState(false);
   return (
     <>
-      <div className="header">
-        <button className="sos" onClick={() => setSos(true)}>
-          Вызвать аварийную службу
-        </button>
-        <button className="bell" onClick={props.onBell} aria-label={props.unread ? `Уведомления: ${props.unread} новых` : 'Уведомления'}>
-          <svg width="22" height="22" viewBox="0 0 24 24" aria-hidden="true">
-            <path
-              d="M12 3a6 6 0 0 0-6 6v3.6L4.3 15.4A1 1 0 0 0 5.2 17h13.6a1 1 0 0 0 .9-1.6L18 12.6V9a6 6 0 0 0-6-6Zm0 18a2.5 2.5 0 0 0 2.4-2h-4.8a2.5 2.5 0 0 0 2.4 2Z"
-              fill="currentColor"
-            />
-          </svg>
-          {props.unread > 0 && <span className="bell__badge">{props.unread > 9 ? '9+' : props.unread}</span>}
+      <div className="sos-bar">
+        <button className="sos" onClick={() => setOpen(true)}>
+          Номера аварийной службы
         </button>
       </div>
-      {sos && <EmergencySheet apartment={props.apartment} onClose={() => setSos(false)} />}
+      {open && <EmergencySheet apartment={props.apartment} onClose={() => setOpen(false)} />}
     </>
   );
 }

@@ -4,7 +4,8 @@ import { z } from 'zod';
 import { issueSessionToken, linkSecret, verifySessionToken } from '../auth/sessionToken.js';
 import { validateWebAppData } from '../auth/webAppData.js';
 import type { ApartmentInfo, BotStore, OrgInfo, RequestInfo } from '../bot/store.js';
-import { formatAddress } from '../domain/address.js';
+import { formatAddress, matchHouse } from '../domain/address.js';
+import { parseApartmentNumber } from '../bot/bot.js';
 import { complaintText } from '../domain/complaint.js';
 import { MAX_PHOTOS } from '../domain/photos.js';
 import { CATEGORY_ORDER, NORMS } from '../domain/norms.js';
@@ -44,6 +45,11 @@ const LinkBody = z.object({ code: z.string().min(1).max(2048) });
 const RequestId = z.string().regex(/^[A-Za-z0-9-]{1,64}$/);
 const NewRequestBody = z.object({ description: z.string().max(4000), category: z.string().max(32) });
 const SuggestBody = z.object({ description: z.string().max(4000) });
+const ApartmentBody = z.object({
+  house_id: z.string().regex(/^[A-Za-z0-9-]{1,64}$/),
+  number: z.string().max(20),
+  entrance: z.number().int().min(1).max(50).nullable().optional(),
+});
 
 type Locals = { userId: string };
 
@@ -191,6 +197,56 @@ export function createApiRouter(deps: ApiDeps) {
   };
 
   router.get('/me', auth, async (_req, res: Response<unknown, Locals>) => {
+    const a = await deps.store.getApartment(res.locals.userId);
+    res.json({ apartment: a ? apartmentView(a) : null });
+  });
+
+  // ── смена адреса (то же, что «Сменить адрес» в боте) ────────────────────
+
+  /** Поиск дома по справочнику: тот же разбор, что в боте (опечатки, «корп.», дроби). */
+  router.get('/houses/search', auth, async (req, res) => {
+    const q = typeof req.query.q === 'string' ? req.query.q.slice(0, 200) : '';
+    const houses = await deps.store.listHouses();
+    const view = (h: (typeof houses)[number]) => ({
+      id: h.id,
+      address: formatAddress(h),
+      entrances: h.entrances,
+      uk: h.manager ? { name: h.manager.name, verified: h.manager.verified } : null,
+    });
+    if (q.trim().length < 2) {
+      res.json({ kind: 'empty', houses: [], total: houses.length });
+      return;
+    }
+    const m = matchHouse(q, houses);
+    res.json({
+      kind: m.kind,
+      street: 'street' in m ? m.street : null,
+      apartment: m.query.apartment ?? null,
+      houses: m.kind === 'not_found' ? [] : m.houses.slice(0, 20).map(view),
+      total: houses.length,
+    });
+  });
+
+  router.put('/me/apartment', auth, express.json({ limit: '4kb' }), async (req, res: Response<unknown, Locals>) => {
+    const body = ApartmentBody.safeParse(req.body);
+    const house = body.success ? await deps.store.getHouse(body.data.house_id) : null;
+    const number = body.success ? parseApartmentNumber(body.data.number) : null;
+    if (!body.success || !house) {
+      res.status(400).json({ error: 'bad_house' });
+      return;
+    }
+    if (!number) {
+      res.status(400).json({ error: 'bad_number' });
+      return;
+    }
+    const entrance = body.data.entrance ?? null;
+    if (entrance !== null && house.entrances && entrance > house.entrances) {
+      res.status(400).json({ error: 'bad_entrance' });
+      return;
+    }
+    await deps.store.ensureUser(res.locals.userId);
+    await deps.store.saveApartment(res.locals.userId, { houseId: house.id, number, entrance });
+    log.info({ userId: res.locals.userId, house: house.code }, 'api: адрес изменён в мини-приложении');
     const a = await deps.store.getApartment(res.locals.userId);
     res.json({ apartment: a ? apartmentView(a) : null });
   });

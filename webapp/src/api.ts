@@ -258,6 +258,28 @@ async function resolveRequest(id: string): Promise<RequestItem | null> {
   return (await res.json()) as RequestItem;
 }
 
+export interface HouseHit {
+  id: string;
+  address: string;
+  entrances: number | null;
+  uk: { name: string; verified: boolean } | null;
+}
+export interface HouseSearch {
+  kind: 'empty' | 'found' | 'no_number' | 'need_number' | 'not_found';
+  street: string | null;
+  apartment: string | null;
+  houses: HouseHit[];
+  total: number;
+}
+
+async function setApartment(body: { house_id: string; number: string; entrance: number | null }): Promise<{ ok: true; apartment: Apartment } | { ok: false; error: string }> {
+  const res = await authed('/api/me/apartment', { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+  const b = (await res.json().catch(() => null)) as { apartment?: Apartment; error?: string } | null;
+  if (res.ok && b?.apartment) return { ok: true, apartment: b.apartment };
+  if (res.status === 400 && b?.error) return { ok: false, error: b.error };
+  throw new NetworkError(`http ${res.status}`);
+}
+
 export const api = {
   photo: photoBlob,
   cancel: cancelRequest,
@@ -265,6 +287,8 @@ export const api = {
   uploadPhoto,
   resolve: resolveRequest,
   catalog: () => get<Catalog>('/api/catalog'),
+  searchHouses: (q: string) => get<HouseSearch>(`/api/houses/search?q=${encodeURIComponent(q)}`),
+  setApartment,
   notifications: () => get<{ items: AppNotification[] }>('/api/notifications'),
   complaint: (id: string) => get<{ text: string; where: string; note: string }>(`/api/requests/${encodeURIComponent(id)}/complaint`),
   suggest: async (description: string) => {

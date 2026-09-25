@@ -1,15 +1,16 @@
 import { useCallback, useEffect, useState } from 'react';
 import { api, AuthError, login, NetworkError, type Apartment as Apt, type AppNotification, type Catalog, type RequestItem } from './api';
-import { Header, Notifications } from './components';
+import { EmergencyBar, Header, Notifications } from './components';
 import { notifSeen } from './store';
 import { insideMax, openBotChat, startParam, tap, webApp } from './bridge';
 import { Apartment } from './screens/Apartment';
+import { ChangeAddress } from './screens/ChangeAddress';
 import { NewRequest } from './screens/NewRequest';
 import { RequestDetails } from './screens/RequestDetails';
 import { Requests } from './screens/Requests';
 import { Loading, StateScreen } from './ui';
 
-type Route = { name: 'requests' } | { name: 'request'; id: string } | { name: 'apartment' } | { name: 'new' } | { name: 'notifications' };
+type Route = { name: 'requests' } | { name: 'request'; id: string } | { name: 'apartment' } | { name: 'new' } | { name: 'notifications' } | { name: 'address' };
 
 const BASE = '/app/';
 
@@ -20,6 +21,7 @@ function parseRoute(pathname: string): Route {
   if (/^apartment\/?$/.test(rest)) return { name: 'apartment' };
   if (/^new\/?$/.test(rest)) return { name: 'new' };
   if (/^notifications\/?$/.test(rest)) return { name: 'notifications' };
+  if (/^address\/?$/.test(rest)) return { name: 'address' };
   return { name: 'requests' };
 }
 /** Экран из параметра запуска бота: «apartment» или «req_<id>». */
@@ -31,12 +33,13 @@ function initialRoute(): Route {
   if (m) return { name: 'request', id: m[1]! };
   if (p === 'apartment') return { name: 'apartment' };
   if (p === 'new') return { name: 'new' };
+  if (p === 'address') return { name: 'address' };
   return fromPath;
 }
 const routePath = (r: Route) =>
   BASE + (r.name === 'request' ? `requests/${r.id}` : r.name === 'requests' ? '' : r.name);
 /** Экраны без вкладок, с кнопкой «Назад». */
-const isInner = (r: Route) => r.name === 'request' || r.name === 'new' || r.name === 'notifications';
+const isInner = (r: Route) => r.name === 'request' || r.name === 'new' || r.name === 'notifications' || r.name === 'address';
 
 type Phase =
   | { kind: 'auth' }
@@ -128,7 +131,7 @@ export function App() {
     if (route.name === 'new') {
       if (catalog.status !== 'ok') api.catalog().then((c) => setCatalog({ status: 'ok', value: c }), (e) => fail(e, setCatalog));
     }
-    if (route.name !== 'request') setBanner(null);
+    if (route.name !== 'request' && route.name !== 'apartment') setBanner(null);
     if (route.name === 'request') {
       const cached = requests.status === 'ok' ? requests.value.find((r) => r.id === route.id) : undefined;
       setDetail(cached ? { status: 'ok', value: cached } : { status: 'loading' });
@@ -190,6 +193,17 @@ export function App() {
     history.replaceState(history.state, '', routePath({ name: 'request', id: r.id }));
     setRoute({ name: 'request', id: r.id });
     setBanner(note ? { text: `Заявка ${r.number} зарегистрирована. ${note}`, warn: true } : { text: `Заявка ${r.number} зарегистрирована.` });
+    tap();
+    window.scrollTo(0, 0);
+  };
+  /** Адрес сохранён: экран «Квартира» с новым адресом; форма адреса не остаётся в истории. */
+  const onAddressSaved = (a: Apt) => {
+    const had = apartment.status === 'ok' && !!apartment.value;
+    setApartment({ status: 'ok', value: a });
+    history.replaceState(history.state, '', routePath({ name: 'apartment' }));
+    setRoute({ name: 'apartment' });
+    setBanner({ text: `${had ? 'Адрес изменён' : 'Адрес сохранён'}: ${a.address}, кв. ${a.number}.` });
+    loadNotifs();
     tap();
     window.scrollTo(0, 0);
   };
@@ -263,7 +277,6 @@ export function App() {
     <main className="page">
       <div className="page__inner">
       <Header
-        apartment={apartment.status === 'ok' ? apartment.value : null}
         unread={route.name === 'notifications' ? 0 : unread}
         onBell={() => route.name !== 'notifications' && go({ name: 'notifications' })}
       />
@@ -285,9 +298,15 @@ export function App() {
           </a>
         </div>
       )}
-      {(route.name === 'new' || route.name === 'notifications') && (
+      {(route.name === 'new' || route.name === 'notifications' || route.name === 'address') && (
         <h1 className="gutter" style={{ fontSize: 22, margin: '0 0 12px', color: 'var(--text-primary)' }}>
-          {route.name === 'new' ? 'Новая заявка' : 'Уведомления'}
+          {route.name === 'new'
+            ? 'Новая заявка'
+            : route.name === 'notifications'
+              ? 'Уведомления'
+              : apartment.status === 'ok' && apartment.value
+                ? 'Сменить адрес'
+                : 'Указать адрес'}
         </h1>
       )}
       {route.name === 'notifications' && (
@@ -298,7 +317,7 @@ export function App() {
           onJoin={(category) => openNew(category)}
         />
       )}
-      {banner && route.name === 'request' && (
+      {banner && (route.name === 'request' || route.name === 'apartment') && (
         <div className={`banner${banner.warn ? ' banner--warn' : ''}`} role="status" style={{ marginBottom: 12 }}>
           {banner.text}
         </div>
@@ -341,8 +360,8 @@ export function App() {
             ) : (
               <StateScreen
                 title="Сначала укажите адрес"
-                text="Заявка привязывается к вашей квартире. Укажите адрес дома в чате с ботом — это нужно один раз."
-                action={bot ? { label: 'Открыть чат с ботом', onClick: writeBot } : undefined}
+                text="Заявка привязывается к вашей квартире. Укажите адрес дома — это нужно один раз."
+                action={{ label: 'Указать адрес', onClick: () => go({ name: 'address' }) }}
               />
             )
           }
@@ -350,10 +369,23 @@ export function App() {
       )}
       {route.name === 'apartment' && (
         <DataView data={apartment} retry={loadApartment}>
-          {(a) => <Apartment apartment={a} onWriteBot={writeBot} />}
+          {(a) => <Apartment apartment={a} onChangeAddress={() => go({ name: 'address' })} />}
+        </DataView>
+      )}
+      {route.name === 'address' && (
+        <DataView data={apartment} retry={loadApartment}>
+          {(a) => (
+            <ChangeAddress
+              current={a}
+              onSaved={onAddressSaved}
+              onCancel={back}
+              onAuthError={(e) => setPhase({ kind: 'auth_error', problem: e.problem })}
+            />
+          )}
         </DataView>
       )}
       </div>
+      <EmergencyBar apartment={apartment.status === 'ok' ? apartment.value : null} />
     </main>
   );
 }

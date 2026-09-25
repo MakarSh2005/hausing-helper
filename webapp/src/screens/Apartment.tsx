@@ -3,15 +3,15 @@ import type { Apartment as Apt } from '../api';
 import { phoneHref } from '../format';
 import { Field, orgName } from '../ui';
 
-export function Apartment(props: { apartment: Apt | null; onWriteBot: () => void }) {
+export function Apartment(props: { apartment: Apt | null; onChangeAddress: () => void }) {
   const a = props.apartment;
   if (!a) {
     return (
       <div className="state">
         <h1>Квартира не привязана</h1>
-        <p>Укажите адрес дома в чате с ботом — это нужно один раз. После этого здесь появятся данные дома и управляющей компании, и можно будет подавать заявки.</p>
-        <Button size="medium" onClick={props.onWriteBot}>
-          Открыть чат с ботом
+        <p>Укажите адрес дома — это нужно один раз. После этого здесь появятся данные дома и управляющей компании, и можно будет подавать заявки.</p>
+        <Button size="medium" onClick={props.onChangeAddress}>
+          Указать адрес
         </Button>
       </div>
     );
@@ -68,7 +68,14 @@ export function Apartment(props: { apartment: Apt | null; onWriteBot: () => void
       </section>
 
       {!h.data_verified && <p className="note">Справочник домов работает в тестовом режиме.</p>}
-      <p className="note">Сменить адрес — кнопкой «Сменить адрес» в чате с ботом.</p>
+      <div className="gutter">
+        <Button size="large" variant="secondary" stretched onClick={props.onChangeAddress}>
+          Сменить адрес
+        </Button>
+        <p className="note" style={{ margin: '8px 0 0', textAlign: 'center' }}>
+          Уже поданные заявки останутся с прежним адресом.
+        </p>
+      </div>
     </div>
   );
 }

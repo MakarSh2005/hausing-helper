@@ -323,12 +323,28 @@ body {
 /* ── шапка: аварийка и уведомления ── */
 .header {
   display: flex;
-  gap: 8px;
-  align-items: stretch;
+  justify-content: flex-end;
   margin: 0 16px 12px;
 }
+/* Место под закреплённую снизу кнопку, чтобы она не закрывала конец страницы */
+.page {
+  padding-bottom: calc(96px + env(safe-area-inset-bottom));
+}
+.sos-bar {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 10;
+  padding: 10px 16px calc(10px + env(safe-area-inset-bottom));
+  background: var(--background-surface);
+  box-shadow: 0 -1px 0 rgba(0, 0, 0, 0.08);
+}
 .sos {
-  flex: 1;
+  display: block;
+  width: 100%;
+  max-width: 608px;
+  margin: 0 auto;
   appearance: none;
   border: 0;
   border-radius: 12px;
@@ -339,6 +355,9 @@ body {
   font-weight: 700;
   font-size: 16px;
   cursor: pointer;
+}
+.bell {
+  height: 44px;
 }
 .sos:active {
   background: #c01d27;
@@ -531,4 +550,29 @@ body {
   background: none;
   font: inherit;
   cursor: pointer;
+}
+
+/* ── смена адреса ── */
+.house-list {
+  display: flex;
+  flex-direction: column;
+  margin-top: 8px;
+}
+.house-hit {
+  appearance: none;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  padding: 10px 0;
+  border: 0;
+  border-top: 1px solid var(--divider-primary);
+  background: none;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.house-hit:focus-visible {
+  outline: 2px solid var(--text-themed);
+  outline-offset: 2px;
 }
