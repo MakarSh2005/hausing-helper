@@ -1,5 +1,6 @@
 import type { Db } from '../db.js';
 import { formatAddress } from '../domain/address.js';
+import { decodeRef, encodeRef, type PhotoRef, type StoredPhoto } from '../domain/photos.js';
 import type { OrgType, RequestCategory, RequestStatus } from '../domain/enums.js';
 
 /**
@@ -52,6 +53,8 @@ export interface SessionData {
   pending?: string;
   /** Категория в оформляемой заявке. */
   category?: RequestCategory;
+  /** Фото, присланные в ходе оформления (до MAX_PHOTOS). */
+  photos?: PhotoRef[];
 }
 
 export interface RequestInfo {
@@ -69,6 +72,7 @@ export interface RequestInfo {
   address: string;
   /** Дом заявки (не меняется при перепривязке квартиры). */
   house: HouseInfo;
+  photos: StoredPhoto[];
 }
 
 export interface NewRequest {
@@ -78,6 +82,7 @@ export interface NewRequest {
   description: string;
   orgType: OrgType;
   dueAt: Date;
+  photos?: PhotoRef[];
 }
 
 export interface OverdueQuery {
@@ -114,6 +119,8 @@ export interface BotStore {
   overdueRequests(q: OverdueQuery): Promise<Array<{ maxUserId: string; chatId: string | null; request: RequestInfo }>>;
   /** true — отметили мы (защита от двойного напоминания при параллельных запусках). */
   markReminded(id: string, at: Date): Promise<boolean>;
+  /** Файл фото скачан на диск. */
+  setPhotoFile(photoId: string, file: string): Promise<void>;
 }
 
 export const IDLE: Session = { state: 'idle', data: {} };
@@ -121,7 +128,12 @@ export const IDLE: Session = { state: 'idle', data: {} };
 // ─── Prisma ──────────────────────────────────────────────────────────────────
 
 const houseInclude = { manager: true } as const;
-const requestInclude = { organization: true, house: { include: houseInclude }, apartment: true } as const;
+const requestInclude = {
+  organization: true,
+  house: { include: houseInclude },
+  apartment: true,
+  attachments: { orderBy: { createdAt: 'asc' } },
+} as const;
 const OPEN: RequestStatus[] = ['created', 'accepted', 'in_progress'];
 
 type OrgRow = { name: string; phone: string | null; dispatcherPhone: string | null; workingHours: string | null; dataSource: string };
@@ -140,6 +152,7 @@ type RequestRow = {
   organization: OrgRow | null;
   house: HouseRow;
   apartment: { number: string; entrance: number | null };
+  attachments: Array<{ id: string; type: string; ref: string }>;
 };
 
 const isVerified = (dataSource: string) => dataSource === 'gis_zhkh' || dataSource === 'open_data';
@@ -157,6 +170,7 @@ function toRequest(r: RequestRow): RequestInfo {
     status: r.status as RequestStatus, createdAt: r.createdAt, dueAt: r.dueAt, reminderSentAt: r.reminderSentAt,
     org: r.organization ? toOrg(r.organization) : null,
     house: toHouse(r.house),
+    photos: r.attachments.filter((a) => a.type === 'image').map((a) => decodeRef(a.id, a.ref)),
     // Заявки до появления снимка адреса: собираем из дома заявки и текущего номера квартиры.
     address: r.address ?? `${formatAddress(r.house)}, кв. ${r.apartment.number}`,
   };
@@ -264,6 +278,7 @@ export function createPrismaStore(db: Db, opts: { cacheMs?: number } = {}): BotS
             userId: id, apartmentId: apt.id, houseId: apt.houseId,
             category: r.category, description: r.description, address: r.address, orgType: r.orgType, organizationId,
             dueAt: r.dueAt,
+            attachments: { create: (r.photos ?? []).map((p) => ({ type: 'image', ref: encodeRef(p) })) },
           },
           include: requestInclude,
         });
@@ -309,6 +324,11 @@ export function createPrismaStore(db: Db, opts: { cacheMs?: number } = {}): BotS
         chatId: r.user.maxChatId,
         request: toRequest(r as unknown as RequestRow),
       }));
+    },
+    async setPhotoFile(photoId, file) {
+      const a = await db.requestAttachment.findUnique({ where: { id: photoId } });
+      if (!a) return;
+      await db.requestAttachment.update({ where: { id: photoId }, data: { ref: encodeRef({ ...decodeRef(a.id, a.ref), file }) } });
     },
     async markReminded(id, at) {
       const res = await db.request.updateMany({ where: { id, reminderSentAt: null }, data: { reminderSentAt: at } });

@@ -3,6 +3,7 @@ import { useState } from 'react';
 import type { RequestItem } from '../api';
 import { dateTime } from '../format';
 import { Field, orgName, StatusPill } from '../ui';
+import { Photos } from './Photos';
 
 /** Отзыв — в два шага: случайное нажатие не должно закрыть заявку. */
 function CancelBlock({ onCancel }: { onCancel: () => Promise<string | null> }) {
@@ -71,6 +72,8 @@ export function RequestDetails({ r, onCancel }: { r: RequestItem; onCancel: () =
         <Field label="Адрес">{r.address}</Field>
         <Field label="Ответственный">{r.org ? orgName(r.org) : 'Управляющая компания дома'}</Field>
       </section>
+
+      <Photos requestId={r.id} photos={r.photos} />
 
       <section className="card">
         <Field label={open ? (r.overdue ? 'Срок истёк' : 'Срок по нормативу') : 'Срок был'} negative={open && r.overdue}>

@@ -2,6 +2,7 @@ import type { Logger } from 'pino';
 import { formatAddress, matchHouse, parseAddressQuery } from '../domain/address.js';
 import { detectCategory } from '../domain/category.js';
 import { complaintText } from '../domain/complaint.js';
+import { extractPhotos, hasNonPhoto, MAX_PHOTOS, type PhotoRef } from '../domain/photos.js';
 import type { RequestCategory } from '../domain/enums.js';
 import { CATEGORY_ORDER, computeDueAt, formatMsk, NORMS, type Norm } from '../domain/norms.js';
 import { effectiveStatus, isOpen, OPEN_STATUSES, STATUS_LABEL } from '../domain/requestStatus.js';
@@ -28,6 +29,8 @@ export interface BotIO {
   send(chatId: string, text: string, keyboard?: Button[][]): Promise<void>;
   /** Короткий ответ на нажатие (снимает «часики» на телефоне). Ошибки глотает. */
   answer(callbackId: string, notification: string): Promise<void>;
+  /** Отправить фото по токенам MAX (например, чтобы жилец приложил их к жалобе). */
+  sendPhotos?(chatId: string, text: string, tokens: string[]): Promise<void>;
 }
 
 export interface BotOptions {
@@ -47,6 +50,8 @@ export interface BotOptions {
    * undefined — бот ещё не проверил токен или мини-приложение не подключено: тогда кнопка-ссылка.
    */
   openApp?: () => { webApp: string; contactId?: number } | undefined;
+  /** Скачивание фото заявки на постоянный диск (после подачи). */
+  photoStorage?: { download(url: string, id: string): Promise<string | null> };
 }
 
 /** Экран мини-приложения → start_param (только латиница, цифры, «_» и «-»). */
@@ -74,6 +79,7 @@ const P = {
   cat: 'req:cat:', // + категория
   send: 'req:send',
   recat: 'req:recat',
+  addPhoto: 'req:photo',
   cancel: 'req:cancel',
   solved: 'req:solved:', // + id заявки
   unsolved: 'req:unsolved:', // + id заявки
@@ -327,10 +333,10 @@ export function createBot(deps: { store: BotStore; io: BotIO; logger: Logger; op
     await io.send(ev.chatId, ASK_PROBLEM, cancelKeyboard());
   }
 
-  async function takeDescription(ev: ParsedEvent, text: string, a: ApartmentInfo) {
+  async function takeDescription(ev: ParsedEvent, text: string, a: ApartmentInfo, photos: PhotoRef[] = []) {
     const description = text.replace(/\s+/g, ' ').trim().slice(0, MAX_DESCRIPTION);
     if (description.replace(/\s/g, '').length < MIN_DESCRIPTION) {
-      await setState(ev.userId, { state: 'req.describe', data: {} });
+      await setState(ev.userId, { state: 'req.describe', data: photos.length ? { photos } : {} });
       return io.send(ev.chatId, `Опишите, пожалуйста, чуть подробнее.\n\n${ASK_PROBLEM}`, cancelKeyboard());
     }
     const category = detectCategory(description);
@@ -339,32 +345,57 @@ export function createBot(deps: { store: BotStore; io: BotIO; logger: Logger; op
       log.info({ userId: ev.userId }, 'bot: сообщение о газе — отправлена памятка');
       return io.send(ev.chatId, GAS, menuKeyboard());
     }
-    if (!category) return askCategory(ev, description, 'Не смог сам определить, к чему относится проблема. Выберите категорию:');
-    return preview(ev, a, description, category);
+    if (!category) return askCategory(ev, description, 'Не смог сам определить, к чему относится проблема. Выберите категорию:', photos);
+    return preview(ev, a, description, category, photos);
   }
 
-  async function askCategory(ev: ParsedEvent, description: string, intro: string) {
-    await setState(ev.userId, { state: 'req.category', data: { pending: description } });
+  async function askCategory(ev: ParsedEvent, description: string, intro: string, photos: PhotoRef[] = []) {
+    await setState(ev.userId, { state: 'req.category', data: { pending: description, ...(photos.length ? { photos } : {}) } });
     const buttons = CATEGORY_ORDER.map((c) => btn.callback(NORMS[c].title, P.cat + c));
     await io.send(ev.chatId, `${intro}\n\n«${short(description, 200)}»`, [...chunk(buttons, 2), ...cancelKeyboard()]);
   }
 
-  async function preview(ev: ParsedEvent, a: ApartmentInfo, description: string, category: Exclude<RequestCategory, 'gas'>) {
-    await setState(ev.userId, { state: 'req.confirm', data: { pending: description, category } });
+  async function preview(
+    ev: ParsedEvent,
+    a: ApartmentInfo,
+    description: string,
+    category: Exclude<RequestCategory, 'gas'>,
+    photos: PhotoRef[] = [],
+    note?: string,
+  ) {
+    await setState(ev.userId, { state: 'req.confirm', data: { pending: description, category, ...(photos.length ? { photos } : {}) } });
     const norm = NORMS[category];
     const lines = [
+      ...(note ? [note, ''] : []),
       'Проверьте заявку:',
       '',
       `Адрес: ${apartmentLine(a)}`,
       `Проблема: ${description}`,
       `Категория: ${norm.title}`,
+      ...(photos.length ? [`Фото: ${photos.length}`] : []),
       `Кому: ${responsibleLine(norm, a.house)}`,
       ...normLines(norm),
     ];
     await io.send(ev.chatId, lines.join('\n'), [
       [btn.callback('Отправить', P.send, 'positive')],
+      ...(photos.length < MAX_PHOTOS ? [[btn.callback(photos.length ? 'Добавить ещё фото' : 'Добавить фото', P.addPhoto)]] : []),
       [btn.callback('Другая категория', P.recat), btn.callback('Отмена', P.cancel)],
     ]);
+  }
+
+  /** Фото пришли сообщением: добавляем к черновику и возвращаем жильца на его шаг. */
+  async function onPhotos(ev: ParsedEvent, incoming: PhotoRef[], text: string, session: Session, a: ApartmentInfo) {
+    const had = session.data.photos ?? [];
+    const photos = [...had, ...incoming].slice(0, MAX_PHOTOS);
+    const dropped = had.length + incoming.length - photos.length;
+    const added = `Фото добавлено (${photos.length} из ${MAX_PHOTOS}).${dropped > 0 ? ` Лишние ${dropped} не приложены: не больше ${MAX_PHOTOS} фото к заявке.` : ''}`;
+    // Подпись к фото — это описание проблемы
+    if (text) return takeDescription(ev, text, a, photos);
+    const { pending, category } = session.data;
+    if (session.state === 'req.confirm' && pending && category && category !== 'gas') return preview(ev, a, pending, category, photos, added);
+    if (session.state === 'req.category' && pending) return askCategory(ev, pending, `${added}\nВыберите категорию:`, photos);
+    await setState(ev.userId, { state: 'req.describe', data: { photos } });
+    await io.send(ev.chatId, `${added}\nТеперь опишите проблему одним сообщением — фото приложу к заявке.`, cancelKeyboard());
   }
 
   async function submit(ev: ParsedEvent, session: Session) {
@@ -379,8 +410,9 @@ export function createBot(deps: { store: BotStore; io: BotIO; logger: Logger; op
     // Сначала создаём, потом сбрасываем черновик: при сбое базы описание не теряется и «Отправить» можно нажать снова.
     // Двойное нажатие не создаст вторую заявку: события пользователя идут строго по очереди (см. handle),
     // и второе нажатие увидит уже сброшенное состояние.
+    const photos = session.data.photos ?? [];
     const r = await store.createRequest(ev.userId, {
-      category, description: pending, address: apartmentLine(a), orgType: norm.orgType, dueAt: computeDueAt(norm, now),
+      category, description: pending, address: apartmentLine(a), orgType: norm.orgType, dueAt: computeDueAt(norm, now), photos,
     });
     await setState(ev.userId, { ...IDLE, data: {} });
     log.info({ userId: ev.userId, number: r.number, category }, `bot: заявка ${r.number} создана (${category})`);
@@ -391,6 +423,7 @@ export function createBot(deps: { store: BotStore; io: BotIO; logger: Logger; op
       `Заявка ${r.number} зарегистрирована.`,
       '',
       `Проблема: ${r.description}`,
+      ...(r.photos.length ? [`Фото: ${r.photos.length} — приложены к заявке`] : []),
       `Ответственный: ${r.org ? orgName(r.org) : responsibleLine(norm, a.house)}`,
       ...normLines(norm, r.dueAt),
       '',
@@ -408,6 +441,19 @@ export function createBot(deps: { store: BotStore; io: BotIO; logger: Logger; op
         : []),
     ];
     await io.send(ev.chatId, lines.join('\n'), menuWithApp(ev.userId, 'Заявка в приложении', `requests/${r.id}`));
+    await savePhotoFiles(r.photos);
+  }
+
+  /** Скачать фото заявки на диск: после ответа жильцу, ошибки не мешают заявке (файл останется по ссылке MAX). */
+  async function savePhotoFiles(photos: Array<{ id: string; url?: string }>) {
+    if (!opts.photoStorage) return;
+    await Promise.all(
+      photos.map(async (p) => {
+        if (!p.url) return;
+        const file = await opts.photoStorage!.download(p.url, p.id);
+        if (file) await store.setPhotoFile(p.id, file);
+      }),
+    );
   }
 
   async function listRequests(ev: ParsedEvent) {
@@ -422,7 +468,8 @@ export function createBot(deps: { store: BotStore; io: BotIO; logger: Logger; op
       const open = OPEN_STATUSES.includes(shown);
       const due = !open ? '' : r.dueAt <= now ? ` · срок истёк ${formatMsk(r.dueAt)}` : ` · срок до ${formatMsk(r.dueAt)}`;
       const title = r.category === 'gas' ? 'Газ' : NORMS[r.category].title;
-      return [`${r.number} · ${title}`, `«${short(r.description, 80)}»`, `Статус: ${STATUS_LABEL[shown]}${demoMark}${due}`].join('\n');
+      const ph = r.photos.length ? ` · фото: ${r.photos.length}` : '';
+      return [`${r.number} · ${title}${ph}`, `«${short(r.description, 80)}»`, `Статус: ${STATUS_LABEL[shown]}${demoMark}${due}`].join('\n');
     });
     const head = list.length === LIST_LIMIT ? `Последние ${LIST_LIMIT} заявок:` : 'Ваши заявки:';
     const anyOpen = list.some((r) => isOpen(r.status));
@@ -498,9 +545,18 @@ export function createBot(deps: { store: BotStore; io: BotIO; logger: Logger; op
         norm,
         createdAt: r.createdAt,
         dueAt: r.dueAt,
+        photos: r.photos.length,
       }),
       menuKeyboard(),
     );
+    const tokens = r.photos.map((ph) => ph.token).filter((t): t is string => !!t);
+    if (tokens.length && io.sendPhotos) {
+      try {
+        await io.sendPhotos(ev.chatId, `Фото к заявке ${r.number} — приложите их к жалобе:`, tokens);
+      } catch (err) {
+        log.warn(`bot: не удалось переслать фото заявки ${r.number} — ${describeError(err)}`);
+      }
+    }
   }
 
   async function remindOverdue(): Promise<number> {
@@ -591,7 +647,22 @@ export function createBot(deps: { store: BotStore; io: BotIO; logger: Logger; op
 
   async function onMessage(ev: ParsedEvent) {
     const text = (ev.text ?? '').trim();
-    if (!text) return io.send(ev.chatId, 'Я понимаю только текст и кнопки. Напишите, пожалуйста, словами.');
+    const photos = extractPhotos(ev.attachments);
+    // Формат фото взят из открытых клиентов MAX, не из официальной документации: если «image» пришло,
+    // но разобрать не удалось, пишем в лог имена полей (без значений) — чтобы быстро поправить разбор.
+    const images = (ev.attachments ?? []).filter((x) => x.type === 'image');
+    if (images.length > photos.length) {
+      const keys = images.map((x) => Object.keys((x.payload ?? {}) as object).join(',') || 'нет payload').join(' | ');
+      log.warn(`bot: фото не разобрано — поля вложения: ${keys}`);
+    }
+    if (!text && photos.length === 0) {
+      return io.send(
+        ev.chatId,
+        hasNonPhoto(ev.attachments)
+          ? 'Видео, файлы и стикеры не принимаю. Пришлите фото или опишите проблему текстом.'
+          : 'Я понимаю текст, фото и кнопки. Напишите, пожалуйста, словами.',
+      );
+    }
     if (/^\/?(start|старт|начать|меню|menu)$/i.test(text)) return start(ev);
     if (/^\/?(help|помощь|справка|\?)$/i.test(text)) return help(ev);
     if (/^\/?(мои )?заявки$/i.test(text)) return listRequests(ev);
@@ -599,6 +670,14 @@ export function createBot(deps: { store: BotStore; io: BotIO; logger: Logger; op
 
     const session = await store.getSession(ev.userId);
     const pending = session.data.pending;
+
+    if (photos.length) {
+      const apt = session.state.startsWith('onb.') ? null : await store.getApartment(ev.userId);
+      if (apt) return onPhotos(ev, photos, text, session, apt);
+      // Привязка квартиры ещё идёт или не начата: фото пока некуда приложить
+      await io.send(ev.chatId, 'Фото приложите к заявке чуть позже — сначала привяжем квартиру.');
+      if (!text) return;
+    }
     // «Отмена» словами: в черновике — отменить черновик, иначе — отозвать поданную заявку.
     if (/^(отмена|отменить|отменить заявку)$/i.test(text)) {
       if (session.state.startsWith('req.')) {
@@ -645,7 +724,7 @@ export function createBot(deps: { store: BotStore; io: BotIO; logger: Logger; op
     if (session.state === 'idle' && words < 3 && !detectCategory(text)) {
       return io.send(ev.chatId, `Чтобы подать заявку, опишите проблему одним сообщением.\nНапример: «Течёт батарея в комнате».`, menuKeyboard());
     }
-    return takeDescription(ev, text, a);
+    return takeDescription(ev, text, a, session.state.startsWith('req.') ? (session.data.photos ?? []) : []);
   }
 
   async function onCallback(ev: ParsedEvent) {
@@ -676,13 +755,22 @@ export function createBot(deps: { store: BotStore; io: BotIO; logger: Logger; op
       if (!(session.state === 'req.category' || session.state === 'req.confirm') || !description || !a || !(category in NORMS)) {
         return io.send(ev.chatId, 'Эта кнопка устарела. Опишите проблему заново.', menuKeyboard());
       }
-      return preview(ev, a, description, category as Exclude<RequestCategory, 'gas'>);
+      return preview(ev, a, description, category as Exclude<RequestCategory, 'gas'>, session.data.photos ?? []);
     }
     if (p === P.recat) {
       if (session.state !== 'req.confirm' || !session.data.pending) {
         return io.send(ev.chatId, 'Эта кнопка устарела. Опишите проблему заново.', menuKeyboard());
       }
-      return askCategory(ev, session.data.pending, 'Выберите категорию:');
+      return askCategory(ev, session.data.pending, 'Выберите категорию:', session.data.photos ?? []);
+    }
+    if (p === P.addPhoto) {
+      if (!session.state.startsWith('req.')) return io.send(ev.chatId, 'Эта кнопка устарела. Опишите проблему заново.', menuKeyboard());
+      const n = session.data.photos?.length ?? 0;
+      if (n >= MAX_PHOTOS) return io.send(ev.chatId, `К заявке уже приложено ${MAX_PHOTOS} фото — это максимум.`);
+      return io.send(
+        ev.chatId,
+        `Пришлите фото сюда, в чат — одно или несколько (ещё ${MAX_PHOTOS - n}). Я добавлю их к заявке и снова покажу её перед отправкой.`,
+      );
     }
     if (p === P.send) return submit(ev, session);
     if (p === P.cancel) {

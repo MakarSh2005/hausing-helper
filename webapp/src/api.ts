@@ -44,6 +44,7 @@ export interface RequestItem {
   org: Org | null;
   norm: { what: string; ref: string } | null;
   address: string;
+  photos: Array<{ id: string; available: boolean }>;
 }
 
 export type AuthProblem = 'no_launch_data' | 'expired' | 'rejected';
@@ -185,7 +186,17 @@ async function cancelRequest(id: string): Promise<{ ok: true; request: RequestIt
   return { ok: true, request: (await res.json()) as RequestItem };
 }
 
+/** Фото заявки как blob: картинки в <img> не отправляют заголовок авторизации. */
+async function photoBlob(requestId: string, photoId: string): Promise<Blob> {
+  const res = await timedFetch(`/api/requests/${encodeURIComponent(requestId)}/photos/${encodeURIComponent(photoId)}`, {
+    headers: token ? { authorization: `Bearer ${token}` } : {},
+  });
+  if (!res.ok) throw new NetworkError(`http ${res.status}`);
+  return res.blob();
+}
+
 export const api = {
+  photo: photoBlob,
   cancel: cancelRequest,
   me: () => get<{ apartment: Apartment | null }>('/api/me'),
   requests: () => get<{ items: RequestItem[] }>('/api/requests'),

@@ -11,6 +11,7 @@ import crypto from 'node:crypto';
 import { startPoller, warnIfWebhookActive } from './max/poller.js';
 import { autoSubscribe } from './max/subscription.js';
 import { createMaxFetch } from './max/tls.js';
+import { createPhotoStorage } from './photos/storage.js';
 import { startDedupCleanup } from './webhook/dedup.js';
 import { createWebhookHandler } from './webhook/handler.js';
 import { SlidingWindowLimiter } from './webhook/rateLimit.js';
@@ -28,15 +29,18 @@ async function main() {
     logger.error(`необработанный отказ промиса — ${describeError(err)}`);
   });
   const db = createDb();
+  const maxFetch = createMaxFetch(config.MAX_CA_FILE, logger);
   const max = new MaxClient({
     token: config.MAX_BOT_TOKEN,
     baseUrl: config.MAX_API_URL,
     logger,
-    fetchImpl: createMaxFetch(config.MAX_CA_FILE, logger),
+    fetchImpl: maxFetch,
   });
 
   // Проверка токена при старте (ТЗ 5.0.1). 401 — конфигурация сломана, в проде падаем.
   // Имя и ссылку бота отдаём на GET /bot — их не видно в логах хостингов, показывающих только текст.
+  // Фото заявок скачиваются с серверов MAX — тем же fetch, что знает сертификаты Минцифры.
+  const photoStorage = createPhotoStorage({ dir: config.DATA_DIR, fetchImpl: maxFetch, logger });
   const botInfo: { name?: string; username?: string; link?: string; userId?: number } = {};
   try {
     const me = await max.getMe();
@@ -71,6 +75,7 @@ async function main() {
     options: {
       demoStatuses: config.MOCK_AUTO_STATUS_CHANGE,
       demoDueMinutes: config.DEMO_DUE_MINUTES,
+      photoStorage,
       // Код входа — во фрагменте (#): он не уходит на сервер в строке запроса и не попадает в логи.
       appLink: appBase
         ? (userId, path = '') => `${appBase}/app/${path}#t=${issueSessionToken(userId, appLinkKey, LINK_TTL_SEC)}`
@@ -112,6 +117,7 @@ async function main() {
     sessionSecret: sessionKey,
     sessionTtlSec: config.SESSION_TTL_SECONDS,
     demoStatuses: config.MOCK_AUTO_STATUS_CHANGE,
+    photoStorage,
   });
   if (!config.SESSION_JWT_SECRET) logger.info('мини-приложение: ключ сессий производный от токена бота (SESSION_JWT_SECRET не задан)');
   const app = createApp({ db, logger, webhook, botInfo, api, webappDir: config.WEBAPP_DIR });

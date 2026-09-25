@@ -52,6 +52,8 @@ const EnvSchema = z.object({
   SESSION_TTL_SECONDS: z.coerce.number().int().positive().default(3600),
 
   DATABASE_URL: z.string().min(1),
+  /** Постоянный диск: фото заявок лежат в <DATA_DIR>/photos. В Docker — /data. */
+  DATA_DIR: z.string().default('./data'),
 
   MOCK_AUTO_STATUS_CHANGE: bool,
   /** Демо: напоминание о заявке через N минут вместо нормативного срока (сам срок в заявке не меняется). */

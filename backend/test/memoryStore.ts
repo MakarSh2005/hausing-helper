@@ -63,6 +63,7 @@ export function memoryStore(houses = HOUSES) {
       const row: ReqRow = {
         id: `r${++counter}`, number: `REQ-2026-${String(counter).padStart(5, '0')}`, user: u, orgType: r.orgType,
         houseId: a.house.id, org: r.orgType === 'UK' ? a.house.manager : TKO_ORG, address: r.address,
+        photos: (r.photos ?? []).map((p, i) => ({ ...p, id: `r${counter}p${i}` })),
         category: r.category, description: r.description, status: 'created', createdAt: new Date(clock.now), dueAt: r.dueAt,
         reminderSentAt: null,
       };
@@ -90,6 +91,9 @@ export function memoryStore(houses = HOUSES) {
         .filter((r) => ['created', 'accepted', 'in_progress'].includes(r.status) && !r.reminderSentAt)
         .filter((r) => (q.createdBefore ? r.createdAt <= q.createdBefore : r.dueAt <= q.now))
         .map((r) => ({ maxUserId: r.user, chatId: 'c1', request: view(r) })),
+    setPhotoFile: async (photoId, file) => {
+      for (const r of requests) for (const p of r.photos) if (p.id === photoId) p.file = file;
+    },
     markReminded: async (id, at) => {
       const r = requests.find((x) => x.id === id);
       if (!r || r.reminderSentAt) return false;

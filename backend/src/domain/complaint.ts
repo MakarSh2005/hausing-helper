@@ -29,6 +29,8 @@ export interface ComplaintInput {
   norm: Norm;
   createdAt: Date;
   dueAt: Date;
+  /** Сколько фото приложено к заявке. */
+  photos?: number;
 }
 
 export function complaintText(c: ComplaintInput): string {
@@ -46,6 +48,7 @@ export function complaintText(c: ComplaintInput): string {
     `[${DATE.format(c.createdAt)}] я обратился(-ась) к ${to} [по телефону / письменно / через ГИС ЖКХ] по проблеме: «${c.description}».`,
     `Согласно ${c.norm.ref}: ${c.norm.what}.`,
     `Срок истёк ${DATETIME.format(c.dueAt)} (МСК), проблема не устранена.`,
+    ...(c.photos ? [`Фотографии прилагаю (${c.photos} шт.).`] : []),
     '',
     `Прошу провести проверку и обязать ${orgAcc} устранить нарушение.`,
     '',

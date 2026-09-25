@@ -31,6 +31,12 @@ export function createMaxIO(deps: { max: Pick<MaxClient, 'sendMessage' | 'answer
         await post(chatId, text, withoutOpenApp(keyboard!));
       }
     },
+    async sendPhotos(chatId: string, text: string, tokens: string[]) {
+      await deps.max.sendMessage(
+        { chatId },
+        { text: text.slice(0, 4000), attachments: tokens.slice(0, 10).map((token) => ({ type: 'image', payload: { token } })) },
+      );
+    },
     async answer(callbackId: string, notification: string) {
       try {
         await deps.max.answerCallback(callbackId, { notification });

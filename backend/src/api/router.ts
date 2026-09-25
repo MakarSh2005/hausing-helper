@@ -7,6 +7,7 @@ import type { ApartmentInfo, BotStore, OrgInfo, RequestInfo } from '../bot/store
 import { formatAddress } from '../domain/address.js';
 import { NORMS } from '../domain/norms.js';
 import { effectiveStatus, OPEN_STATUSES, STATUS_LABEL } from '../domain/requestStatus.js';
+import { CONTENT_TYPES, type PhotoStorage } from '../photos/storage.js';
 import { SlidingWindowLimiter } from '../webhook/rateLimit.js';
 
 /**
@@ -29,6 +30,8 @@ export interface ApiDeps {
   now?: () => Date;
   /** Лимиты: на токен для /api/* (ТЗ 9.2 — 60/мин) и на IP для входа. */
   perUserPerMin?: number;
+  /** Файлы фото заявок. */
+  photoStorage?: PhotoStorage;
   sessionPerIpPerMin?: number;
 }
 
@@ -91,6 +94,8 @@ function requestView(r: RequestInfo, now: Date, demo: boolean) {
     org: orgView(r.org, false),
     norm: norm ? { what: norm.what, ref: norm.ref } : null,
     address: r.address,
+    // Только id и наличие файла: ссылки и токены MAX клиенту не отдаём
+    photos: r.photos.map((p) => ({ id: p.id, available: !!p.file })),
   };
 }
 
@@ -189,6 +194,23 @@ export function createApiRouter(deps: ApiDeps) {
       return;
     }
     res.json(requestView(r, clock(), !!deps.demoStatuses));
+  });
+
+  // Фото заявки: только своей, только с нашего диска. Картинки в <img> не шлют заголовок
+  // Authorization, поэтому мини-приложение забирает их fetch-ем и показывает как blob.
+  router.get('/requests/:id/photos/:photoId', auth, async (req, res: Response<unknown, Locals>) => {
+    const id = RequestId.safeParse(req.params.id);
+    const photoId = RequestId.safeParse(req.params.photoId);
+    const r = id.success && photoId.success ? await deps.store.getRequest(res.locals.userId, id.data) : null;
+    const photo = r?.photos.find((p) => p.id === photoId.data);
+    const file = photo?.file ? deps.photoStorage?.resolve(photo.file) : null;
+    if (!file) {
+      res.status(404).json({ error: 'not_found' });
+      return;
+    }
+    res.set('Cache-Control', 'private, max-age=86400');
+    res.type(CONTENT_TYPES[file.split('.').pop()!] ?? 'application/octet-stream');
+    res.sendFile(file);
   });
 
   // Отзыв заявки жильцом. Это не «смена статуса» из ТЗ v1.0 (её убрали из публичного API):
