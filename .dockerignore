@@ -1,0 +1,11 @@
+# Для корневого Dockerfile (контекст — весь репозиторий)
+**/node_modules
+**/dist
+backend/data
+**/*.db
+**/*.db-journal
+.env
+.env.*
+!.env.example
+backend/test
+.git

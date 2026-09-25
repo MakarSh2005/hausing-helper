@@ -1,0 +1,16 @@
+{
+  // F5 — запустить бота с отладчиком (можно ставить точки останова в .ts-файлах).
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Запустить бота",
+      "type": "node",
+      "request": "launch",
+      "cwd": "${workspaceFolder}/backend",
+      "runtimeArgs": ["--env-file=${workspaceFolder}/.env", "--import", "tsx"],
+      "program": "${workspaceFolder}/backend/src/index.ts",
+      "console": "integratedTerminal",
+      "skipFiles": ["<node_internals>/**", "**/node_modules/**"]
+    }
+  ]
+}

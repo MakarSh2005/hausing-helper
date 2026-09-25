@@ -1,0 +1,25 @@
+# Запуск всего сервиса одной командой: docker compose up --build
+# Перед первым запуском: cp .env.example .env и заполнить секреты.
+#
+# Тот же образ, что и на хостинге (Dockerfile в корне): при старте миграции → seed → бот,
+# мини-приложение — по адресу http://localhost:3000/app/.
+
+name: housing-helper
+
+services:
+  app:
+    build: .
+    env_file: .env
+    environment:
+      # Путь внутри тома — иначе БД теряется при пересоздании контейнера (ТЗ 9.3).
+      DATABASE_URL: file:/data/app.db
+      PORT: "3000"
+      NODE_ENV: production
+    volumes:
+      - app-data:/data
+    ports:
+      - "${BACKEND_PORT:-3000}:3000"
+    restart: unless-stopped
+
+volumes:
+  app-data:

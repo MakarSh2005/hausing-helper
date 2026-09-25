@@ -1,0 +1,170 @@
+/* Поверх токенов MAX UI: цвета берутся из темы клиента, поэтому светлая и тёмная работают сами. */
+:root {
+  color-scheme: light dark;
+}
+html,
+body {
+  margin: 0;
+}
+* {
+  box-sizing: border-box;
+}
+
+/* Токены темы объявлены на корне MaxUI, поэтому фон задаём здесь, а не на body.
+   Подложка — surface, карточки — card: так они различимы и в светлой, и в тёмной теме. */
+.page {
+  min-height: 100dvh;
+  background: var(--background-surface);
+  padding: 12px 0 calc(24px + env(safe-area-inset-bottom));
+}
+.page__inner {
+  max-width: 640px;
+  margin: 0 auto;
+}
+
+.gutter {
+  padding: 0 16px;
+}
+
+.tabs {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px;
+  margin: 0 16px 16px;
+  padding: 4px;
+  border-radius: 12px;
+  background: var(--background-tertiary, rgba(127, 127, 127, 0.14));
+}
+.tab {
+  appearance: none;
+  border: 0;
+  border-radius: 9px;
+  padding: 9px 8px;
+  font: inherit;
+  font-weight: 600;
+  font-size: 15px;
+  color: var(--text-secondary);
+  background: transparent;
+  cursor: pointer;
+}
+.tab[aria-selected='true'] {
+  color: var(--text-primary);
+  background: var(--background-card);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
+}
+.tab:focus-visible,
+.linkish:focus-visible {
+  outline: 2px solid var(--text-themed);
+  outline-offset: 2px;
+}
+
+.stack {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 16px;
+  white-space: nowrap;
+  color: var(--text-secondary);
+  background: var(--background-tertiary, rgba(127, 127, 127, 0.14));
+}
+.pill--active {
+  color: var(--text-themed);
+}
+.pill--done {
+  color: var(--icon-positive);
+}
+.pill--overdue {
+  color: var(--text-negative);
+}
+
+.card {
+  margin: 0 16px;
+  padding: 16px;
+  border-radius: 16px;
+  background: var(--background-card);
+}
+.card h2 {
+  margin: 0 0 4px;
+  font-size: 20px;
+  line-height: 26px;
+  color: var(--text-primary);
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 10px 0;
+  border-top: 1px solid var(--divider-primary, rgba(127, 127, 127, 0.2));
+}
+.field:first-of-type {
+  border-top: 0;
+}
+.field__label {
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+.field__value {
+  font-size: 16px;
+  line-height: 22px;
+  color: var(--text-primary);
+  overflow-wrap: anywhere;
+}
+.field__value--negative {
+  color: var(--text-negative);
+  font-weight: 600;
+}
+
+.note {
+  margin: 0 16px;
+  font-size: 13px;
+  line-height: 18px;
+  color: var(--text-tertiary, var(--text-secondary));
+}
+
+.state {
+  min-height: 100dvh;
+  background: var(--background-surface);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 24px;
+  text-align: center;
+}
+.state h1 {
+  margin: 0;
+  font-size: 20px;
+  color: var(--text-primary);
+}
+.state p {
+  margin: 0;
+  max-width: 320px;
+  font-size: 15px;
+  line-height: 21px;
+  color: var(--text-secondary);
+}
+
+.linkish {
+  color: var(--text-themed);
+  text-decoration: none;
+  font-weight: 600;
+}
+
+.req-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}

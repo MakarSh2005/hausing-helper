@@ -1,0 +1,46 @@
+{
+  // Меню VS Code: Terminal → Run Task… (Терминал → Запустить задачу…)
+  "version": "2.0.0",
+  "options": {
+    "cwd": "${workspaceFolder}/backend"
+  },
+  // На Windows запускаем через cmd: PowerShell по умолчанию часто блокирует npm.ps1
+  "windows": {
+    "options": {
+      "shell": { "executable": "cmd.exe", "args": ["/d", "/c"] }
+    }
+  },
+  "tasks": [
+    {
+      "label": "1. Подготовить проект (один раз)",
+      "detail": "Создаёт .env, ставит зависимости, создаёт базу и заполняет справочники",
+      "type": "shell",
+      "command": "npm run setup",
+      "problemMatcher": [],
+      "presentation": { "reveal": "always", "panel": "dedicated", "clear": true }
+    },
+    {
+      "label": "2. Запустить бота",
+      "detail": "Бот перезапускается сам при изменении кода. Остановить — Ctrl+C в терминале",
+      "type": "shell",
+      "command": "npm run dev",
+      "isBackground": true,
+      "problemMatcher": [],
+      "presentation": { "reveal": "always", "panel": "dedicated", "clear": true }
+    },
+    {
+      "label": "Прогнать тесты",
+      "type": "shell",
+      "command": "npm test",
+      "group": "test",
+      "problemMatcher": []
+    },
+    {
+      "label": "Сбросить базу данных",
+      "detail": "Удаляет все данные (привязки квартир, заявки) и заново заполняет справочники",
+      "type": "shell",
+      "command": "npm run db:reset",
+      "problemMatcher": []
+    }
+  ]
+}

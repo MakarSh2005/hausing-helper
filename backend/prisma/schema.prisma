@@ -1,0 +1,271 @@
+// Жилищный помощник — схема БД.
+//
+// SQLite не поддерживает enum в Prisma, поэтому перечисления хранятся строками,
+// а допустимые значения описаны в src/domain/enums.ts и проверяются Zod на границе.
+// Имена таблиц — snake_case (@@map), поля в коде — camelCase.
+
+generator client {
+  provider      = "prisma-client-js"
+  binaryTargets = ["native", "linux-musl-openssl-3.0.x"]
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// ─── Пользователь и квартира ─────────────────────────────────────────────────
+
+model User {
+  id         String   @id @default(uuid())
+  /// user_id из MAX. Строкой: int64 не помещается в JS number без потерь.
+  maxUserId  String   @unique
+  /// chat_id диалога с ботом — нужен, чтобы бот мог написать первым (напоминания).
+  maxChatId  String?
+  name       String?
+  username   String?
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+  lastSeenAt DateTime @default(now())
+
+  apartment Apartment?
+  session   UserSession?
+  requests  Request[]
+
+  @@map("users")
+}
+
+/// Одна привязанная квартира на пользователя; «сменить квартиру» — перезапись.
+model Apartment {
+  id            String   @id @default(uuid())
+  userId        String   @unique
+  houseId       String
+  /// Номер квартиры — ПДн в связке с адресом, в логи не пишем.
+  number        String
+  entrance      Int?
+  floor         Int?
+  /// Лицевой счёт — опционален, в логи не пишем.
+  accountNumber String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  user     User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  house    House     @relation(fields: [houseId], references: [id])
+  requests Request[]
+
+  @@index([houseId])
+  @@map("apartments")
+}
+
+// ─── Справочники: организации, дома, тарифы, капремонт ───────────────────────
+
+/// УК, РСО, муниципальные службы, фонд капремонта, ГЖИ — одна таблица с типом.
+model Organization {
+  id              String    @id @default(uuid())
+  /// OrgType: UK | RSO | MUNICIPAL | CAPREPAIR_FUND | GZHI
+  type            String
+  name            String
+  inn             String?   @unique
+  ogrn            String?
+  licenseNumber   String?
+  address         String?
+  phone           String?
+  dispatcherPhone String?
+  email           String?
+  website         String?
+  workingHours    String?
+  /// Город/зона обслуживания — для РСО и муниципальных служб без привязки к дому.
+  city            String?
+  /// Происхождение данных: "gis_zhkh" | "open_data" | "synthetic".
+  dataSource      String
+  dataActualAt    DateTime?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  managedHouses House[]   @relation("HouseManager")
+  requests      Request[]
+
+  @@index([type, city])
+  @@map("organizations")
+}
+
+model House {
+  id               String    @id @default(uuid())
+  /// Публичный код для диплинков: https://max.ru/<bot>?start=house_001. Не ПДн.
+  code             String    @unique
+  city             String
+  street           String
+  houseNumber      String
+  building         String?
+  /// Канонический ключ поиска (этап 3): "казань|баумана|15|".
+  normalizedKey    String    @unique
+  fullAddress      String
+  district         String?
+  gisGuid          String?   @unique
+  yearBuilt        Int?
+  floors           Int?
+  entrances        Int?
+  apartmentsCount  Int?
+  wallMaterial     String?
+  totalAreaM2      Decimal?
+  managerId        String?
+  /// "regional_operator" | "special_account"
+  capRepairFundType String?
+  dataSource       String
+  dataActualAt     DateTime?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  manager         Organization?      @relation("HouseManager", fields: [managerId], references: [id])
+  apartments      Apartment[]
+  tariffs         Tariff[]
+  capRepairWorks  CapitalRepairWork[]
+  requests        Request[]
+
+  @@index([city, street])
+  @@index([managerId])
+  @@map("houses")
+}
+
+/// Тариф: houseId = null — общегородской (РСО), иначе — по дому (содержание, ремонт).
+model Tariff {
+  id           String    @id @default(uuid())
+  houseId      String?
+  /// TariffService: heating | cold_water | hot_water | wastewater | electricity | gas | solid_waste | maintenance | capital_repair
+  service      String
+  unit         String
+  price        Decimal
+  providerName String?
+  city         String?
+  validFrom    DateTime
+  validTo      DateTime?
+  dataSource   String
+  createdAt    DateTime  @default(now())
+
+  house House? @relation(fields: [houseId], references: [id], onDelete: Cascade)
+
+  @@index([houseId, service])
+  @@index([city, service])
+  @@map("tariffs")
+}
+
+model CapitalRepairWork {
+  id            String   @id @default(uuid())
+  houseId       String
+  workType      String
+  plannedFrom   Int
+  plannedTo     Int
+  /// "planned" | "in_progress" | "done"
+  status        String   @default("planned")
+  dataSource    String
+  createdAt     DateTime @default(now())
+
+  house House @relation(fields: [houseId], references: [id], onDelete: Cascade)
+
+  @@index([houseId])
+  @@map("capital_repair_works")
+}
+
+/// Правило маршрутизации: категория проблемы → тип ответственной организации → нормативный срок.
+model ResponsibleOrg {
+  id             String   @id @default(uuid())
+  /// RequestCategory: heating | water | sewerage | electricity | elevator | roof | entrance | yard | garbage | gas | other
+  category       String   @unique
+  title          String
+  /// OrgType, см. Organization.type
+  orgType        String
+  /// Срок реакции в часах. Значения в seed черновые — сверить с нормативами на этапе 3.
+  responseHours  Int
+  /// Ссылка на норму (пункт ПП РФ и т.п.); null — ещё не сверено.
+  normativeRef   String?
+  isEmergency    Boolean  @default(false)
+  sortOrder      Int      @default(0)
+  updatedAt      DateTime @updatedAt
+
+  @@map("responsible_orgs")
+}
+
+// ─── Заявки ──────────────────────────────────────────────────────────────────
+
+model Request {
+  id               String    @id @default(uuid())
+  /// REQ-YYYY-NNNNN
+  number           String    @unique
+  userId           String
+  apartmentId      String
+  houseId          String
+  category         String
+  description      String
+  /// Адрес на момент подачи («ул. Баумана, д. 15, кв. 42, подъезд 2»): квартиру можно
+  /// перепривязать, а адрес в заявке и в жалобе меняться не должен. null — заявки до 25.09.
+  address          String?
+  /// RequestStatus: created | accepted | in_progress | completed | rejected.
+  /// Отображаемый статус считает effectiveStatus() от createdAt (ТЗ 5.2.4).
+  status           String    @default("created")
+  orgType          String
+  organizationId   String?
+  /// Нормативный срок реакции, считается при создании.
+  dueAt            DateTime
+  reminderSentAt   DateTime?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  user         User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+  apartment    Apartment           @relation(fields: [apartmentId], references: [id], onDelete: Cascade)
+  house        House               @relation(fields: [houseId], references: [id])
+  organization Organization?       @relation(fields: [organizationId], references: [id])
+  attachments  RequestAttachment[]
+
+  @@index([userId, createdAt])
+  @@index([status, dueAt, reminderSentAt])
+  @@map("requests")
+}
+
+/// Фото к заявке (Won't have в MVP, таблица заложена заранее).
+model RequestAttachment {
+  id        String   @id @default(uuid())
+  requestId String
+  type      String
+  /// token/url вложения из MAX
+  ref       String
+  createdAt DateTime @default(now())
+
+  request Request @relation(fields: [requestId], references: [id], onDelete: Cascade)
+
+  @@index([requestId])
+  @@map("request_attachments")
+}
+
+/// Счётчик номеров заявок по годам: REQ-2026-00001, REQ-2026-00002…
+model RequestCounter {
+  year  Int @id
+  value Int @default(0)
+
+  @@map("request_counters")
+}
+
+// ─── Служебные таблицы бота ──────────────────────────────────────────────────
+
+/// Состояние FSM (онбординг, заявка). В БД, а не в памяти — переживает рестарт.
+model UserSession {
+  userId    String   @id
+  /// Имя состояния FSM, например "onboarding.await_address"
+  state     String   @default("idle")
+  /// JSON-строка с данными шага (черновик заявки и т.п.)
+  data      String   @default("{}")
+  expiresAt DateTime?
+  updatedAt DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("user_sessions")
+}
+
+/// Идемпотентность вебхука (ТЗ 5.1.5). id — "msg:<mid>" | "cb:<callback_id>" | "start:<user_id>:<timestamp>".
+model ProcessedUpdate {
+  id          String   @id
+  processedAt DateTime @default(now()) @map("processed_at")
+
+  @@index([processedAt])
+  @@map("processed_updates")
+}
