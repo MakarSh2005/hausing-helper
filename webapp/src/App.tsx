@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { api, AuthError, login, NetworkError, type Apartment as Apt, type AppNotification, type Catalog, type RequestItem } from './api';
-import { EmergencyBar, Header, Notifications } from './components';
+import { Header, Notifications } from './components';
 import { notifSeen } from './store';
 import { insideMax, openBotChat, startParam, tap, webApp } from './bridge';
 import { Apartment } from './screens/Apartment';
@@ -277,6 +277,7 @@ export function App() {
     <main className="page">
       <div className="page__inner">
       <Header
+        apartment={apartment.status === 'ok' ? apartment.value : null}
         unread={route.name === 'notifications' ? 0 : unread}
         onBell={() => route.name !== 'notifications' && go({ name: 'notifications' })}
       />
@@ -385,7 +386,6 @@ export function App() {
         </DataView>
       )}
       </div>
-      <EmergencyBar apartment={apartment.status === 'ok' ? apartment.value : null} />
     </main>
   );
 }

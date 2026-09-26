@@ -2,35 +2,32 @@ import { useEffect, useState } from 'react';
 import type { Apartment, AppNotification, RequestItem } from './api';
 import { dateTime, phoneHref } from './format';
 
-// ─── шапка: уведомления; внизу экрана — номера аварийных служб ───────────
+// ─── шапка: номера аварийных служб и уведомления — две плитки справа вверху ──
 
-export function Header(props: { unread: number; onBell: () => void }) {
-  return (
-    <div className="header">
-      <button className="bell" onClick={props.onBell} aria-label={props.unread ? `Уведомления: ${props.unread} новых` : 'Уведомления'}>
-        <svg width="22" height="22" viewBox="0 0 24 24" aria-hidden="true">
-          <path
-            d="M12 3a6 6 0 0 0-6 6v3.6L4.3 15.4A1 1 0 0 0 5.2 17h13.6a1 1 0 0 0 .9-1.6L18 12.6V9a6 6 0 0 0-6-6Zm0 18a2.5 2.5 0 0 0 2.4-2h-4.8a2.5 2.5 0 0 0 2.4 2Z"
-            fill="currentColor"
-          />
-        </svg>
-        {props.unread > 0 && <span className="bell__badge">{props.unread > 9 ? '9+' : props.unread}</span>}
-      </button>
-    </div>
-  );
-}
-
-/** Красная кнопка, закреплённая внизу экрана: видна на любом экране и при любой прокрутке. */
-export function EmergencyBar(props: { apartment: Apartment | null }) {
-  const [open, setOpen] = useState(false);
+export function Header(props: { apartment: Apartment | null; unread: number; onBell: () => void }) {
+  const [sos, setSos] = useState(false);
   return (
     <>
-      <div className="sos-bar">
-        <button className="sos" onClick={() => setOpen(true)}>
-          Номера аварийной службы
+      <div className="header">
+        <button className="hdr-btn hdr-btn--sos" onClick={() => setSos(true)} aria-label="Номера аварийной службы" title="Номера аварийной службы">
+          <svg width="22" height="22" viewBox="0 0 24 24" aria-hidden="true">
+            <path
+              d="M6.6 10.8a15.1 15.1 0 0 0 6.6 6.6l2.2-2.2a1 1 0 0 1 1-.25 11.4 11.4 0 0 0 3.6.57 1 1 0 0 1 1 1V20a1 1 0 0 1-1 1A17 17 0 0 1 3 4a1 1 0 0 1 1-1h3.5a1 1 0 0 1 1 1c0 1.25.2 2.45.57 3.6a1 1 0 0 1-.25 1l-2.2 2.2Z"
+              fill="currentColor"
+            />
+          </svg>
+        </button>
+        <button className="hdr-btn" onClick={props.onBell} aria-label={props.unread ? `Уведомления: ${props.unread} новых` : 'Уведомления'}>
+          <svg width="22" height="22" viewBox="0 0 24 24" aria-hidden="true">
+            <path
+              d="M12 3a6 6 0 0 0-6 6v3.6L4.3 15.4A1 1 0 0 0 5.2 17h13.6a1 1 0 0 0 .9-1.6L18 12.6V9a6 6 0 0 0-6-6Zm0 18a2.5 2.5 0 0 0 2.4-2h-4.8a2.5 2.5 0 0 0 2.4 2Z"
+              fill="currentColor"
+            />
+          </svg>
+          {props.unread > 0 && <span className="bell__badge">{props.unread > 9 ? '9+' : props.unread}</span>}
         </button>
       </div>
-      {open && <EmergencySheet apartment={props.apartment} onClose={() => setOpen(false)} />}
+      {sos && <EmergencySheet apartment={props.apartment} onClose={() => setSos(false)} />}
     </>
   );
 }

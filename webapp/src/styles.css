@@ -324,47 +324,13 @@ body {
 .header {
   display: flex;
   justify-content: flex-end;
+  gap: 8px;
   margin: 0 16px 12px;
 }
-/* Место под закреплённую снизу кнопку, чтобы она не закрывала конец страницы */
-.page {
-  padding-bottom: calc(96px + env(safe-area-inset-bottom));
-}
-.sos-bar {
-  position: fixed;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  z-index: 10;
-  padding: 10px 16px calc(10px + env(safe-area-inset-bottom));
-  background: var(--background-surface);
-  box-shadow: 0 -1px 0 rgba(0, 0, 0, 0.08);
-}
-.sos {
-  display: block;
-  width: 100%;
-  max-width: 608px;
-  margin: 0 auto;
-  appearance: none;
-  border: 0;
-  border-radius: 12px;
-  padding: 12px;
-  background: #e0242f;
-  color: #fff;
-  font: inherit;
-  font-weight: 700;
-  font-size: 16px;
-  cursor: pointer;
-}
-.bell {
-  height: 44px;
-}
-.sos:active {
-  background: #c01d27;
-}
-.bell {
+.hdr-btn {
   position: relative;
-  width: 48px;
+  width: 44px;
+  height: 44px;
   flex: none;
   appearance: none;
   border: 0;
@@ -374,6 +340,12 @@ body {
   cursor: pointer;
   display: grid;
   place-items: center;
+}
+.hdr-btn--sos {
+  color: #e0242f;
+}
+.hdr-btn:active {
+  opacity: 0.7;
 }
 .bell__badge {
   position: absolute;
@@ -389,8 +361,7 @@ body {
   font-weight: 700;
   line-height: 18px;
 }
-.sos:focus-visible,
-.bell:focus-visible,
+.hdr-btn:focus-visible,
 .sheet__close:focus-visible,
 .sos-row:focus-visible {
   outline: 2px solid var(--text-themed);
