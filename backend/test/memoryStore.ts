@@ -165,6 +165,10 @@ export function memoryStore(houses = HOUSES) {
         hasMore: all.length > page.length,
         notify: state(u).notify,
         lastReadAt: state(u).lastReadAt,
+        othersReadAt: [...chatState.entries()]
+          .filter(([x]) => x !== u && apartments.get(x)?.houseId === a.houseId)
+          .map(([, st]) => st.lastReadAt)
+          .reduce<Date | null>((m, d) => (d && (!m || d > m) ? d : m), null),
       };
     },
     postChat: async (u, msg, at) => {

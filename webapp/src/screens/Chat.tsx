@@ -77,7 +77,19 @@ function ProfileSheet({ a, address, onClose }: { a: ChatAuthor; address: string;
   );
 }
 
-export function Chat(props: { onAuthError: (e: AuthError) => void; onNoAddress: () => void; onRead: () => void }) {
+/** Одна галочка — отправлено, две — прочитал хотя бы один сосед. */
+function Ticks({ read }: { read: boolean }) {
+  return (
+    <span className={`ticks${read ? ' ticks--read' : ''}`} role="img" aria-label={read ? 'Прочитано' : 'Отправлено, ещё не прочитано'} title={read ? 'Прочитано' : 'Отправлено'}>
+      <svg width={read ? 18 : 12} height="12" viewBox={read ? '0 0 18 12' : '0 0 12 12'} aria-hidden="true">
+        <path d="M1 6.5 4.2 9.5 11 2.5" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+        {read && <path d="M7.4 9.1 7.8 9.5 14.6 2.5" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />}
+      </svg>
+    </span>
+  );
+}
+
+export function Chat(props: { onAuthError: (e: AuthError) => void; onNoAddress: () => void; onRead: () => void; onNotifyChanged: () => void }) {
   const [data, setData] = useState<Loaded | null>(null);
   const [state, setState] = useState<'loading' | 'ok' | 'none' | 'error'>('loading');
   const [messages, setMessages] = useState<ChatMsg[]>([]);
@@ -332,6 +344,7 @@ export function Chat(props: { onAuthError: (e: AuthError) => void; onNoAddress: 
     try {
       const on = await api.chatNotify(!data.notify);
       setData({ ...data, notify: on });
+      props.onNotifyChanged();
       tap();
     } catch (e) {
       if (e instanceof AuthError) onAuthError(e);
@@ -379,16 +392,14 @@ export function Chat(props: { onAuthError: (e: AuthError) => void; onNoAddress: 
         </div>
         <label className={`switch${notifyBusy ? ' switch--busy' : ''}`}>
           <span className="switch__text">Уведомления</span>
-          <input type="checkbox" role="switch" checked={data.notify} disabled={notifyBusy || (!data.can_notify && !data.notify)} onChange={() => void toggleNotify()} />
+          <input type="checkbox" role="switch" checked={data.notify} disabled={notifyBusy} onChange={() => void toggleNotify()} />
           <span className="switch__track" aria-hidden="true" />
         </label>
       </section>
       <p className="note chat-note">
         {data.notify
-          ? 'Бот пришлёт сводку новых сообщений — не чаще раза в 10 минут.'
-          : data.can_notify
-            ? 'Уведомления выключены. Включите, если хотите получать сводку новых сообщений от бота.'
-            : 'Чтобы получать уведомления, сначала напишите что-нибудь боту в чате.'}{' '}
+          ? `Новые сообщения появятся в «Уведомлениях» (колокольчик)${data.can_notify ? ', а бот пришлёт сводку в MAX — не чаще раза в 10 минут' : ''}.`
+          : 'Уведомления выключены. Включите — новые сообщения будут приходить в «Уведомления» и сводкой от бота.'}{' '}
         Соседи видят ваше имя и фото из профиля MAX, номер квартиры — нет.
       </p>
 
@@ -445,6 +456,7 @@ export function Chat(props: { onAuthError: (e: AuthError) => void; onNoAddress: 
                       </button>
                     )}
                     {TIME.format(new Date(m.at))}
+                    {m.mine && !m.deleted && <Ticks read={!!m.read} />}
                   </div>
                 </div>
               </div>

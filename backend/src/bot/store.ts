@@ -133,6 +133,8 @@ export interface ChatView {
   hasMore: boolean;
   notify: boolean;
   lastReadAt: Date | null;
+  /** До какого момента чат прочитан хотя бы одним соседом — для галочек «прочитано» у своих сообщений. */
+  othersReadAt: Date | null;
 }
 
 /** Сводка для уведомления ботом: новые сообщения соседей с прошлого прочтения или прошлой сводки. */
@@ -503,7 +505,7 @@ export function createPrismaStore(db: Db, opts: { cacheMs?: number } = {}): BotS
       const uid = await userId(maxUserId);
       const apt = await db.apartment.findUnique({ where: { userId: uid }, select: { houseId: true } });
       if (!apt) return null;
-      const [rows, members, state] = await Promise.all([
+      const [rows, members, state, others] = await Promise.all([
         db.houseChatMessage.findMany({
           where: { houseId: apt.houseId, ...(opts.before ? { createdAt: { lt: opts.before } } : {}) },
           orderBy: { createdAt: 'desc' },
@@ -512,8 +514,13 @@ export function createPrismaStore(db: Db, opts: { cacheMs?: number } = {}): BotS
         }),
         db.apartment.count({ where: { houseId: apt.houseId } }),
         db.houseChatState.findUnique({ where: { userId: uid } }),
+        db.houseChatState.aggregate({
+          where: { userId: { not: uid }, user: { is: { apartment: { is: { houseId: apt.houseId } } } } },
+          _max: { lastReadAt: true },
+        }),
       ]);
       return {
+        othersReadAt: others._max.lastReadAt ?? null,
         houseId: apt.houseId,
         members,
         hasMore: rows.length > opts.limit,

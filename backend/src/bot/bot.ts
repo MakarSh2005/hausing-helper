@@ -502,7 +502,7 @@ export function createBot(deps: { store: BotStore; io: BotIO; logger: Logger; op
 }
 
 /** Как вложение выглядит в сводке: «Фото», «Голосовое сообщение (0:12)», «Файл «акт.pdf»». */
-function attachmentLabel(last: { kind?: string; fileName?: string | null; duration?: number | null }): string {
+export function attachmentLabel(last: { kind?: string; fileName?: string | null; duration?: number | null }): string {
   if (last.kind === 'photo') return 'Фото';
   if (last.kind === 'voice') {
     const d = last.duration ?? 0;

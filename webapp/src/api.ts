@@ -54,12 +54,14 @@ export interface RequestItem {
 
 export interface AppNotification {
   id: string;
-  kind: 'status' | 'neighbors';
+  kind: 'status' | 'neighbors' | 'chat';
   at: string;
   title: string;
   text: string;
   request_id: string | null;
   category: string | null;
+  /** Сообщение чата уже прочитано в самом чате — в счётчик новых не входит. */
+  read?: boolean;
 }
 
 export type AuthProblem = 'no_launch_data' | 'expired' | 'rejected';
@@ -315,6 +317,8 @@ export interface ChatMsg {
   deleted: boolean;
   at: string;
   mine: boolean;
+  /** Своё: false — одна галочка (отправлено), true — две (прочитал хотя бы один сосед). Чужое — null. */
+  read: boolean | null;
   author: ChatAuthor;
   attachment: ChatAttachment | null;
 }

@@ -161,21 +161,22 @@ export function Notifications(props: {
   seenBefore: number;
   onOpenRequest: (id: string) => void;
   onJoin: (category: string) => void;
+  onOpenChat: () => void;
 }) {
   if (props.items.length === 0) {
     return (
       <div className="state" style={{ minHeight: '50dvh', background: 'transparent' }}>
         <h1>Уведомлений пока нет</h1>
-        <p>Здесь появятся новые статусы ваших заявок и то, о чём уже сообщили соседи по дому.</p>
+        <p>Здесь появятся новые статусы ваших заявок, то, о чём уже сообщили соседи, и сообщения чата дома, если включить уведомления в чате.</p>
       </div>
     );
   }
   return (
     <div className="stack">
       {props.items.map((n) => {
-        const fresh = new Date(n.at).getTime() > props.seenBefore;
+        const fresh = !n.read && new Date(n.at).getTime() > props.seenBefore;
         return (
-          <section key={n.id} className={`card notif${fresh ? ' notif--new' : ''}${n.kind === 'neighbors' ? ' notif--neighbors' : ''}`}>
+          <section key={n.id} className={`card notif${fresh ? ' notif--new' : ''}${n.kind === 'neighbors' ? ' notif--neighbors' : ''}${n.kind === 'chat' ? ' notif--chat' : ''}`}>
             <span className="field__label">
               {n.title} · {dateTime(n.at)}
             </span>
@@ -183,6 +184,11 @@ export function Notifications(props: {
             {n.kind === 'status' && n.request_id && (
               <button className="linkish notif__action" onClick={() => props.onOpenRequest(n.request_id!)}>
                 Открыть заявку
+              </button>
+            )}
+            {n.kind === 'chat' && (
+              <button className="linkish notif__action" onClick={props.onOpenChat}>
+                Открыть чат
               </button>
             )}
             {n.kind === 'neighbors' && n.category && (
@@ -193,7 +199,7 @@ export function Notifications(props: {
           </section>
         );
       })}
-      <p className="note">Соседи видны только как количество заявок по категории — без текста, квартир и имён.</p>
+      <p className="note">Заявки соседей видны только как количество по категории — без текста, квартир и имён.</p>
     </div>
   );
 }

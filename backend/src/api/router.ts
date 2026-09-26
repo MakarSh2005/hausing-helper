@@ -5,7 +5,7 @@ import { issueSessionToken, linkSecret, verifySessionToken } from '../auth/sessi
 import { validateWebAppData } from '../auth/webAppData.js';
 import type { ApartmentInfo, BotStore, ChatMessage, OrgInfo, RequestInfo } from '../bot/store.js';
 import { formatAddress, matchHouse } from '../domain/address.js';
-import { parseApartmentNumber } from '../bot/bot.js';
+import { attachmentLabel, parseApartmentNumber } from '../bot/bot.js';
 import { complaintText } from '../domain/complaint.js';
 import { MAX_PHOTOS } from '../domain/photos.js';
 import { CATEGORY_ORDER, NORMS } from '../domain/norms.js';
@@ -100,7 +100,7 @@ function apartmentView(a: ApartmentInfo, rating: { avg: number; count: number } 
  * Сообщение чата дома для соседей: имя, ник и фото профиля MAX — без user_id и без квартиры.
  * Вложение — подписанной ссылкой (sign): её можно подставить в <img>/<audio> и открыть в браузере.
  */
-function chatMessageView(m: ChatMessage, sign: (id: string) => string) {
+function chatMessageView(m: ChatMessage, sign: (id: string) => string, othersReadAt: Date | null = null) {
   const a = m.attachment;
   return {
     id: m.id,
@@ -108,6 +108,8 @@ function chatMessageView(m: ChatMessage, sign: (id: string) => string) {
     deleted: m.text === null,
     at: m.createdAt.toISOString(),
     mine: m.mine,
+    // Своё сообщение: false — одна галочка (отправлено), true — две (прочитал хотя бы один сосед)
+    read: m.mine ? !!othersReadAt && m.createdAt <= othersReadAt : null,
     author: {
       key: m.author.key,
       name: m.author.name ?? 'Сосед',
@@ -174,7 +176,7 @@ export function createApiRouter(deps: ApiDeps) {
   const chatLimiter = new SlidingWindowLimiter(deps.chatPerMin ?? 10);
   const filesKey = fileKey(deps.sessionSecret);
   const sign = (id: string) => signFile(filesKey, id, clock().getTime());
-  const chatView = (m: ChatMessage) => chatMessageView(m, sign);
+  const chatView = (m: ChatMessage, othersReadAt: Date | null = null) => chatMessageView(m, sign, othersReadAt);
   const ipLimiter = new SlidingWindowLimiter(deps.sessionPerIpPerMin ?? 30);
   setInterval(() => (userLimiter.sweep(), ipLimiter.sweep(), chatLimiter.sweep()), 60_000).unref();
 
@@ -322,22 +324,44 @@ export function createApiRouter(deps: ApiDeps) {
   // Уведомления: новые статусы своих заявок и «Соседи уже сообщили» (заявки из того же дома за неделю)
   router.get('/notifications', auth, async (_req, res: Response<unknown, Locals>) => {
     const now = clock();
-    const [own, neighbors] = await Promise.all([
+    const weekAgo = new Date(now.getTime() - 7 * 86_400_000);
+    const [own, neighbors, chat] = await Promise.all([
       deps.store.listRequests(res.locals.userId, 50),
-      deps.store.houseActivity(res.locals.userId, new Date(now.getTime() - 7 * 86_400_000)),
+      deps.store.houseActivity(res.locals.userId, weekAgo),
+      deps.store.chatView(res.locals.userId, { limit: 30 }),
     ]);
-    const items = buildNotifications(own, neighbors, now, !!deps.demoStatuses);
-    res.json({
-      items: items.map((n) => ({
-        id: n.id,
-        kind: n.kind,
-        at: n.at.toISOString(),
-        title: n.title,
-        text: n.text,
-        request_id: n.requestId ?? null,
-        category: n.category ?? null,
-      })),
-    });
+    const items = buildNotifications(own, neighbors, now, !!deps.demoStatuses).map((n) => ({
+      id: n.id,
+      kind: n.kind as 'status' | 'neighbors' | 'chat',
+      at: n.at.toISOString(),
+      title: n.title,
+      text: n.text,
+      request_id: n.requestId ?? null,
+      category: n.category ?? null,
+      read: false,
+    }));
+    // Чат дома — в колокольчике, если жилец включил уведомления в чате. Прочитанное в самом чате
+    // (раньше lastReadAt) показываем, но в счётчик новых не включаем.
+    if (chat?.notify) {
+      for (const m of chat.messages) {
+        if (m.mine || m.text === null || m.createdAt < weekAgo) continue;
+        const label = m.attachment ? attachmentLabel({ kind: m.attachment.kind, fileName: m.attachment.name, duration: m.attachment.duration }) : '';
+        const body = m.text.replace(/\s+/g, ' ').trim();
+        const preview = label && body ? `${label}: ${body}` : label || body;
+        items.push({
+          id: `chat:${m.id}`,
+          kind: 'chat',
+          at: m.createdAt.toISOString(),
+          title: 'Чат дома',
+          text: `${m.author.name ?? 'Сосед'}: ${preview.length > 160 ? `${preview.slice(0, 159)}…` : preview}`,
+          request_id: null,
+          category: null,
+          read: !!chat.lastReadAt && m.createdAt <= chat.lastReadAt,
+        });
+      }
+      items.sort((a, b) => b.at.localeCompare(a.at));
+    }
+    res.json({ items });
   });
 
   // ── подача заявки из мини-приложения ────────────────────────────────────
@@ -537,7 +561,7 @@ export function createApiRouter(deps: ApiDeps) {
       has_more: view.hasMore,
       last_read_at: view.lastReadAt?.toISOString() ?? null,
       max_text: MAX_CHAT_TEXT,
-      messages: view.messages.map(chatView),
+      messages: view.messages.map((m) => chatView(m, view.othersReadAt)),
       uploads: !!deps.chatFiles,
       limits: { photo: CHAT_LIMITS.photo, voice: CHAT_LIMITS.voice, file: CHAT_LIMITS.file, voice_sec: MAX_VOICE_SEC },
     });

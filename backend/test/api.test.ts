@@ -464,6 +464,50 @@ describe('API мини-приложения', () => {
     assert.deepEqual(after.messages.find((m) => m.id === pm.id), { ...after.messages.find((m) => m.id === pm.id), deleted: true, attachment: null });
   });
 
+  it('чат дома в колокольчике: только при включённых уведомлениях; прочитанное в чате — не новое', async () => {
+    const [A, B] = ['73001', '73002'];
+    await store.ensureUser(A, { name: 'Ольга' });
+    await store.saveApartment(A, { houseId: HOUSES[2]!.id, number: '1', entrance: null });
+    await store.saveApartment(B, { houseId: HOUSES[2]!.id, number: '2', entrance: null });
+    type N = { id: string; kind: string; title: string; text: string; read: boolean };
+    const notifs = async () => ((await (await call('/api/notifications', { token: tokenFor(B) })).json()) as { items: N[] }).items.filter((n) => n.kind === 'chat');
+    clock.now += 1000;
+    await store.postChat(A, { text: 'Воду отключат завтра с 9 до 12' }, new Date(clock.now));
+    assert.equal((await notifs()).length, 0, 'уведомления выключены — в колокольчике чата нет');
+
+    await call('/api/chat/notify', { method: 'PUT', token: tokenFor(B), body: JSON.stringify({ on: true }) });
+    clock.now += 1000;
+    await store.postChat(A, { text: '', attachment: { kind: 'voice', file: 'x.webm', name: null, size: 10, mime: 'audio/webm', duration: 7 } }, new Date(clock.now));
+    await store.postChat(B, { text: 'своё не показываем' }, new Date(clock.now + 1));
+    let items = await notifs();
+    assert.deepEqual(items.map((n) => [n.title, n.text]), [['Чат дома', 'Ольга: Голосовое сообщение (0:07)'], ['Чат дома', 'Ольга: Воду отключат завтра с 9 до 12']]);
+    // B написал в чат — всё, что раньше, прочитано
+    assert.ok(items.every((n) => n.read));
+    clock.now += 60_000;
+    await store.postChat(A, { text: 'Уже включили' }, new Date(clock.now));
+    items = await notifs();
+    assert.equal(items[0]!.text, 'Ольга: Уже включили');
+    assert.equal(items[0]!.read, false, 'новое — в счётчике колокольчика');
+    await call('/api/chat', { token: tokenFor(B) });
+    assert.equal((await notifs())[0]!.read, true, 'открыл чат — прочитано');
+  });
+
+  it('чат дома: галочки — одна, пока никто из соседей не открыл чат, две — после', async () => {
+    const [A, B] = ['74001', '74002'];
+    await store.saveApartment(A, { houseId: HOUSES[3]!.id, number: '1', entrance: null });
+    clock.now += 1000;
+    await store.saveApartment(B, { houseId: HOUSES[3]!.id, number: '2', entrance: null });
+    clock.now += 1000;
+    const sent = (await (await call('/api/chat', { method: 'POST', token: tokenFor(A), body: JSON.stringify({ text: 'Кто брал ключ от чердака?' }) })).json()) as { read: boolean };
+    assert.equal(sent.read, false, 'одна галочка');
+    const mine = async () => ((await (await call('/api/chat', { token: tokenFor(A) })).json()) as { messages: Array<{ mine: boolean; read: boolean | null }> }).messages;
+    assert.equal((await mine()).at(-1)!.read, false);
+    clock.now += 1000;
+    const forB = ((await (await call('/api/chat', { token: tokenFor(B) })).json()) as { messages: Array<{ read: boolean | null }> }).messages;
+    assert.equal(forB.at(-1)!.read, null, 'у чужих сообщений галочек нет');
+    assert.equal((await mine()).at(-1)!.read, true, 'сосед открыл чат — две галочки');
+  });
+
   it('лимит запросов на пользователя → 429', async () => {
     const t = tokenFor('99999');
     const codes: number[] = [];

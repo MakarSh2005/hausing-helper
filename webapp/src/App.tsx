@@ -126,7 +126,16 @@ export function App() {
     loadNotifs();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [route.name]);
-  const unread = notifs.filter((n) => new Date(n.at).getTime() > seen).length;
+  const unread = notifs.filter((n) => !n.read && new Date(n.at).getTime() > seen).length;
+
+  // Счётчик на кнопке чата — чаще, чем остальные уведомления: запрос лёгкий, а сообщения живые
+  useEffect(() => {
+    if (phase.kind !== 'ready' || route.name === 'chat') return;
+    const t = setInterval(() => {
+      if (document.visibilityState === 'visible') api.chatUnread().then((r) => setChatUnread(r.count), () => {});
+    }, 15_000);
+    return () => clearInterval(t);
+  }, [phase.kind, route.name]);
 
   // Данные под текущий экран
   useEffect(() => {
@@ -191,7 +200,11 @@ export function App() {
 
   const writeBot = () => openBotChat(bot);
   const onChatAuthError = useCallback((e: AuthError) => setPhase({ kind: 'auth_error', problem: e.problem }), []);
-  const onChatRead = useCallback(() => setChatUnread(0), []);
+  // Открыли чат — прочитано: гасим и кнопку чата, и сообщения чата в колокольчике
+  const onChatRead = useCallback(() => {
+    setChatUnread(0);
+    setNotifs((ns) => (ns.some((n) => n.kind === 'chat' && !n.read) ? ns.map((n) => (n.kind === 'chat' ? { ...n, read: true } : n)) : ns));
+  }, []);
 
   /** Заявка подана: открываем её карточку вместо формы (форма не остаётся в истории — «Назад» ведёт к списку). */
   const onCreated = (r: RequestItem, note: string | null) => {
@@ -326,6 +339,7 @@ export function App() {
           seenBefore={seenBefore}
           onOpenRequest={(id) => go({ name: 'request', id })}
           onJoin={(category) => openNew(category)}
+          onOpenChat={() => go({ name: 'chat' })}
         />
       )}
       {banner && (route.name === 'request' || route.name === 'apartment') && (
@@ -389,7 +403,7 @@ export function App() {
           {(a) => <Apartment apartment={a} onChangeAddress={() => go({ name: 'address' })} />}
         </DataView>
       )}
-      {route.name === 'chat' && <Chat onAuthError={onChatAuthError} onNoAddress={() => go({ name: 'address' })} onRead={onChatRead} />}
+      {route.name === 'chat' && <Chat onAuthError={onChatAuthError} onNoAddress={() => go({ name: 'address' })} onRead={onChatRead} onNotifyChanged={loadNotifs} />}
       {route.name === 'address' && (
         <DataView data={apartment} retry={loadApartment}>
           {(a) => (
@@ -404,7 +418,7 @@ export function App() {
       )}
       </div>
       {showFab && (
-        <button className="chat-fab" onClick={() => go({ name: 'chat' })} aria-label={chatUnread ? `Чат дома: ${chatUnread} новых` : 'Чат дома'}>
+        <button className="chat-fab" onClick={() => go({ name: 'chat' })} aria-label={chatUnread ? `Чат дома: новых сообщений — ${chatUnread}` : 'Чат дома'}>
           <svg width="26" height="26" viewBox="0 0 24 24" aria-hidden="true">
             <path
               d="M4 4h16a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H9l-4.4 3.5A1 1 0 0 1 3 20.7V6a2 2 0 0 1 1-2Zm3 6.2a1.3 1.3 0 1 0 0 2.6 1.3 1.3 0 0 0 0-2.6Zm5 0a1.3 1.3 0 1 0 0 2.6 1.3 1.3 0 0 0 0-2.6Zm5 0a1.3 1.3 0 1 0 0 2.6 1.3 1.3 0 0 0 0-2.6Z"

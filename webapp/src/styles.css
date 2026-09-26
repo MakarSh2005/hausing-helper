@@ -1131,3 +1131,14 @@ body {
   line-height: 18px;
   cursor: pointer;
 }
+
+.ticks {
+  display: inline-flex;
+  align-items: center;
+  margin-left: 4px;
+  vertical-align: -1px;
+  opacity: 0.75;
+}
+.ticks--read {
+  opacity: 1;
+}
