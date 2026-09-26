@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import type { ApartmentInfo, BotStore, HouseInfo, RequestInfo, Session } from '../src/bot/store.js';
+import type { ApartmentInfo, BotStore, ChatDigest, ChatMessage, HouseInfo, RequestInfo, Session, UserProfile } from '../src/bot/store.js';
 import { isValidOrgInn } from '../src/domain/inn.js';
 
 /** Общие для тестов справочник домов (из настоящего файла данных) и in-memory хранилище. */
@@ -48,15 +48,42 @@ export function memoryStore(houses = HOUSES) {
     return { ...rest, house: byId(houseId)! };
   };
   const users = new Set<string>();
+  const profiles = new Map<string, UserProfile>();
+  type ChatRow = { id: string; houseId: string; user: string; text: string; deleted: boolean; createdAt: Date };
+  const chat: ChatRow[] = [];
+  const chatState = new Map<string, { notify: boolean; lastReadAt: Date | null; lastNotifiedAt: Date | null }>();
+  const state = (u: string) => {
+    if (!chatState.has(u)) chatState.set(u, { notify: false, lastReadAt: null, lastNotifiedAt: null });
+    return chatState.get(u)!;
+  };
+  // Внутренний ключ автора — не user_id MAX (как users.id в БД).
+  const keyOf = (u: string) => `u-${Buffer.from(u).toString('hex')}`;
+  const chatView = (m: ChatRow, me: string): ChatMessage => ({
+    id: m.id, text: m.deleted ? null : m.text, createdAt: m.createdAt, mine: m.user === me,
+    author: { key: keyOf(m.user), name: profiles.get(m.user)?.name ?? null, username: profiles.get(m.user)?.username || null, photoUrl: profiles.get(m.user)?.photoUrl || null },
+  });
+  const unreadOf = (u: string, since: Date | null) => {
+    const a = apartments.get(u);
+    if (!a) return [];
+    return chat.filter((m) => m.houseId === a.houseId && m.user !== u && !m.deleted && (!since || m.createdAt > since));
+  };
+  let chatSeq = 0;
   const store: BotStore = {
-    ensureUser: async (u) => void users.add(u),
+    ensureUser: async (u, p = {}) => {
+      users.add(u);
+      const cur = profiles.get(u) ?? {};
+      profiles.set(u, { ...cur, ...Object.fromEntries(Object.entries(p).filter(([, v]) => v !== undefined)) });
+    },
     listHouses: async () => houses,
     getHouse: async (id) => byId(id),
     getHouseByCode: async (code) => houses.find((h) => h.code === code) ?? null,
     getSession: async (u) => structuredClone(sessions.get(u) ?? { state: 'idle', data: {} }),
     setSession: async (u, s) => void sessions.set(u, structuredClone(s)),
     getApartment: async (u) => apt(u),
-    saveApartment: async (u, a) => void apartments.set(u, { ...a }),
+    saveApartment: async (u, a) => {
+      if (apartments.get(u)?.houseId !== a.houseId) Object.assign(state(u), { lastReadAt: new Date(clock.now), lastNotifiedAt: null });
+      apartments.set(u, { ...a });
+    },
     createRequest: async (u, r) => {
       const a = apt(u);
       if (!a) throw new Error('квартира не привязана');
@@ -65,7 +92,7 @@ export function memoryStore(houses = HOUSES) {
         houseId: a.house.id, org: r.orgType === 'UK' ? a.house.manager : TKO_ORG, address: r.address,
         photos: (r.photos ?? []).map((p, i) => ({ ...p, id: `r${counter}p${i}` })),
         category: r.category, description: r.description, status: 'created', createdAt: new Date(clock.now), dueAt: r.dueAt,
-        reminderSentAt: null, updatedAt: new Date(clock.now),
+        reminderSentAt: null, updatedAt: new Date(clock.now), rating: null,
       };
       requests.push(row);
       return view(row);
@@ -112,6 +139,66 @@ export function memoryStore(houses = HOUSES) {
         .filter((r) => r.user !== u && r.houseId === mine.houseId && r.createdAt >= since)
         .map((r) => ({ category: r.category, createdAt: r.createdAt }));
     },
+    rateRequest: async (u, id, r, at) => {
+      const x = requests.find((y) => y.id === id && y.user === u);
+      if (!x) return 'not_found';
+      if (x.rating) return 'already';
+      if (x.status !== 'completed') return 'not_completed';
+      x.rating = { value: r.value, comment: r.comment, at };
+      return 'ok';
+    },
+    ukRating: async (u) => {
+      const mine = apt(u);
+      const rated = requests.filter((r) => mine?.house.manager && r.org === mine.house.manager && r.rating);
+      return rated.length ? { avg: rated.reduce((s, r) => s + r.rating!.value, 0) / rated.length, count: rated.length } : null;
+    },
+    chatView: async (u, opts) => {
+      const a = apartments.get(u);
+      if (!a) return null;
+      const all = chat.filter((m) => m.houseId === a.houseId && (!opts.before || m.createdAt < opts.before));
+      const page = all.slice(-opts.limit);
+      return {
+        houseId: a.houseId,
+        members: [...apartments.values()].filter((x) => x.houseId === a.houseId).length,
+        messages: page.map((m) => chatView(m, u)),
+        hasMore: all.length > page.length,
+        notify: state(u).notify,
+        lastReadAt: state(u).lastReadAt,
+      };
+    },
+    postChat: async (u, text, at) => {
+      const a = apartments.get(u);
+      if (!a) return null;
+      const m = { id: `m${++chatSeq}`, houseId: a.houseId, user: u, text, deleted: false, createdAt: at };
+      chat.push(m);
+      state(u).lastReadAt = at;
+      return chatView(m, u);
+    },
+    deleteChat: async (u, id) => {
+      const m = chat.find((x) => x.id === id && x.user === u && !x.deleted);
+      if (!m) return false;
+      m.deleted = true;
+      m.text = '';
+      return true;
+    },
+    setChatNotify: async (u, on) => {
+      state(u).notify = on;
+      if (on) state(u).lastNotifiedAt = new Date(clock.now);
+    },
+    markChatRead: async (u, at) => void (state(u).lastReadAt = at),
+    chatUnread: async (u) => unreadOf(u, state(u).lastReadAt).length,
+    chatDigests: async (now, quietMs) => {
+      const out: ChatDigest[] = [];
+      for (const [u, s] of chatState) {
+        if (!s.notify || (s.lastNotifiedAt && now.getTime() - s.lastNotifiedAt.getTime() < quietMs)) continue;
+        const since = [s.lastReadAt, s.lastNotifiedAt].filter((d): d is Date => !!d).reduce<Date | null>((a, b) => (!a || b > a ? b : a), null);
+        const fresh = unreadOf(u, since);
+        const last = fresh.at(-1);
+        if (last) out.push({ maxUserId: u, chatId: 'c1', count: fresh.length, last: { name: profiles.get(last.user)?.name ?? null, text: last.text } });
+      }
+      return out;
+    },
+    markChatNotified: async (u, at) => void (state(u).lastNotifiedAt = at),
     markReminded: async (id, at) => {
       const r = requests.find((x) => x.id === id);
       if (!r || r.reminderSentAt) return false;
@@ -119,7 +206,7 @@ export function memoryStore(houses = HOUSES) {
       return true;
     },
   };
-  return Object.assign(store, { apartments, requests, users });
+  return Object.assign(store, { apartments, requests, users, profiles, chat, chatState });
 }
 
 /** Управляемые часы: 24.09.2026 12:00 МСК (четверг). */

@@ -281,6 +281,123 @@ describe('API мини-приложения', () => {
     assert.equal((await call('/api/houses/search?q=x')).status, 401);
   });
 
+  it('оценка: только выполненной заявки, один раз; средняя оценка УК в /me; время закрытия не сдвигается', async () => {
+    const RU = '67001';
+    const t = tokenFor(RU);
+    store.apartments.set(RU, { houseId: HOUSES[0]!.id, number: '42', entrance: null });
+    const r = await store.createRequest(RU, { address: 'а', category: 'heating', description: 'Течёт батарея', orgType: 'UK', dueAt: new Date(clock.now + 86_400_000) });
+    const rate = (body: unknown, id = r.id) => call(`/api/requests/${id}/rating`, { method: 'POST', token: t, body: JSON.stringify(body) });
+    const open = await rate({ value: 5 });
+    assert.equal(open.status, 409);
+    assert.equal(((await open.json()) as { error: string }).error, 'not_completed');
+    const before = (await (await call(`/api/requests/${r.id}`, { token: t })).json()) as { can_rate: boolean };
+    assert.equal(before.can_rate, false, 'открытую не оценить');
+
+    await call(`/api/requests/${r.id}/resolve`, { method: 'POST', token: t });
+    const closedAt = store.requests.find((x) => x.id === r.id)!.updatedAt.getTime();
+    assert.equal((await rate({ value: 6 })).status, 400);
+    assert.equal((await rate({ value: 0 })).status, 400);
+    clock.now += 60_000;
+    const ok = await rate({ value: 4, comment: '  Пришли быстро,\n\n\n\nно грязь оставили  ' });
+    assert.equal(ok.status, 200);
+    const card = (await ok.json()) as { can_rate: boolean; rating: { value: number; comment: string }; timeline: Array<{ type: string; label: string }> };
+    assert.equal(card.can_rate, false);
+    assert.deepEqual([card.rating.value, card.rating.comment], [4, 'Пришли быстро,\n\nно грязь оставили']);
+    assert.equal(card.timeline.at(-1)!.label, 'Ваша оценка: 4 из 5');
+    assert.equal(store.requests.find((x) => x.id === r.id)!.updatedAt.getTime(), closedAt, 'время закрытия то же');
+    const again = await rate({ value: 1 });
+    assert.equal(again.status, 409);
+    assert.equal(((await again.json()) as { error: string }).error, 'already');
+    assert.equal((await rate({ value: 5 }, 'чужая-или-нет')).status, 404);
+    // Чужую заявку не оценить
+    assert.equal((await call(`/api/requests/${r.id}/rating`, { method: 'POST', token: tokenFor(OTHER), body: JSON.stringify({ value: 1 }) })).status, 404);
+
+    const me = (await (await call('/api/me', { token: t })).json()) as { apartment: { uk: { rating: { avg: number; count: number } | null } } };
+    assert.deepEqual(me.apartment.uk.rating, { avg: 4, count: 1 });
+    clock.now -= 60_000;
+  });
+
+  it('чат дома: только свой дом, профиль MAX без user_id, удаление своего, непрочитанные, флуд и пустые сообщения', async () => {
+    const [A, B, C] = ['70001', '70002', '70003'];
+    for (const u of [A, B, C]) store.chatState.delete(u);
+    store.chat.length = 0;
+    await store.ensureUser(A, { name: 'Анна Петрова', username: 'anna_p', photoUrl: 'https://i.max.ru/a.jpg' });
+    await store.ensureUser(B, { name: 'Борис' });
+    await store.ensureUser(C, { name: 'Вера' });
+    await store.saveApartment(A, { houseId: HOUSES[0]!.id, number: '1', entrance: null });
+    await store.saveApartment(B, { houseId: HOUSES[0]!.id, number: '2', entrance: null });
+    await store.saveApartment(C, { houseId: HOUSES[1]!.id, number: '3', entrance: null });
+    const post = (u: string, text: string) => call('/api/chat', { method: 'POST', token: tokenFor(u), body: JSON.stringify({ text }) });
+
+    clock.now += 1000;
+    const sent = await post(A, '  Кто знает, когда дадут горячую воду?  ');
+    assert.equal(sent.status, 201);
+    const m = (await sent.json()) as { id: string; text: string; mine: boolean; author: Record<string, unknown> };
+    assert.equal(m.text, 'Кто знает, когда дадут горячую воду?');
+    assert.deepEqual(m.author, { key: m.author.key, name: 'Анна Петрова', username: 'anna_p', photo_url: 'https://i.max.ru/a.jpg' });
+    assert.ok(!JSON.stringify(m).includes(A), 'user_id MAX соседям не отдаём');
+
+    assert.equal(((await (await call('/api/chat/unread', { token: tokenFor(B) })).json()) as { count: number }).count, 1);
+    const chatB = (await (await call('/api/chat', { token: tokenFor(B) })).json()) as { available: boolean; members: number; address: string; messages: Array<{ mine: boolean; author: { name: string } }> };
+    assert.equal(chatB.available, true);
+    assert.equal(chatB.members, 2);
+    assert.equal(chatB.messages.length, 1);
+    assert.equal(chatB.messages[0]!.mine, false);
+    assert.equal(((await (await call('/api/chat/unread', { token: tokenFor(B) })).json()) as { count: number }).count, 0, 'открыл — прочитал');
+
+    const chatC = (await (await call('/api/chat', { token: tokenFor(C) })).json()) as { messages: unknown[] };
+    assert.equal(chatC.messages.length, 0, 'чат другого дома не виден');
+    assert.deepEqual(await (await call('/api/chat', { token: tokenFor('70009') })).json(), { available: false });
+    assert.equal((await post('70009', 'привет')).status, 409, 'без квартиры писать нельзя');
+
+    assert.equal((await post(B, '   ')).status, 400);
+    assert.equal((await post(B, 'а'.repeat(1001))).status, 400);
+    assert.equal((await call(`/api/chat/${m.id}`, { method: 'DELETE', token: tokenFor(B) })).status, 404, 'чужое не удалить');
+    assert.equal((await call(`/api/chat/${m.id}`, { method: 'DELETE', token: tokenFor(A) })).status, 200);
+    const afterDel = (await (await call('/api/chat', { token: tokenFor(B) })).json()) as { messages: Array<{ text: string | null; deleted: boolean }> };
+    assert.deepEqual([afterDel.messages[0]!.text, afterDel.messages[0]!.deleted], [null, true]);
+
+    const codes: number[] = [];
+    for (let i = 0; i < 11; i++) codes.push((await post(C, `сообщение ${i}`)).status);
+    assert.deepEqual([codes[9], codes[10]], [201, 429], 'не больше 10 сообщений в минуту');
+  });
+
+  it('чат дома: уведомления по желанию — сводка ботом не чаще раза в 10 минут, при смене дома — новый чат', async () => {
+    const [A, B] = ['71001', '71002'];
+    store.chat.length = 0;
+    await store.ensureUser(A, { name: 'Анна' });
+    await store.saveApartment(A, { houseId: HOUSES[0]!.id, number: '1', entrance: null });
+    await store.saveApartment(B, { houseId: HOUSES[0]!.id, number: '2', entrance: null });
+    const tB = tokenFor(B);
+    clock.now += 1000;
+    await store.postChat(A, 'до включения уведомлений', new Date(clock.now));
+    assert.equal((await store.chatDigests(new Date(clock.now), 600_000)).filter((d) => d.maxUserId === B).length, 0, 'по умолчанию выключены');
+
+    const on = await call('/api/chat/notify', { method: 'PUT', token: tB, body: JSON.stringify({ on: true }) });
+    assert.deepEqual(await on.json(), { notify: true });
+    assert.equal(((await (await call('/api/chat', { token: tB })).json()) as { notify: boolean }).notify, true);
+    clock.now += 11 * 60_000;
+    await store.postChat(A, 'Лифт снова стоит', new Date(clock.now));
+    await store.postChat(A, 'Позвонила в УК', new Date(clock.now + 1));
+    const digests = (await store.chatDigests(new Date(clock.now + 2), 600_000)).filter((d) => d.maxUserId === B);
+    assert.equal(digests.length, 1);
+    assert.deepEqual([digests[0]!.count, digests[0]!.last], [2, { name: 'Анна', text: 'Позвонила в УК' }], 'старое сообщение (до включения) не в сводке');
+    await store.markChatNotified(B, new Date(clock.now + 2));
+    await store.postChat(A, 'ещё одно', new Date(clock.now + 3));
+    assert.equal((await store.chatDigests(new Date(clock.now + 60_000), 600_000)).filter((d) => d.maxUserId === B).length, 0, 'тишина 10 минут');
+
+    await call('/api/chat/notify', { method: 'PUT', token: tB, body: JSON.stringify({ on: false }) });
+    assert.equal((await store.chatDigests(new Date(clock.now + 3_600_000), 600_000)).filter((d) => d.maxUserId === B).length, 0, 'выключил — тишина');
+
+    // Переезд: в новом доме старые сообщения не считаются непрочитанными
+    await store.postChat(A, 'в старом доме', new Date(clock.now + 4));
+    clock.now += 60_000;
+    await store.saveApartment(A, { houseId: HOUSES[1]!.id, number: '9', entrance: null });
+    await store.saveApartment(B, { houseId: HOUSES[1]!.id, number: '9', entrance: null });
+    assert.equal(await store.chatUnread(B), 0);
+    clock.now -= 12 * 60_000 + 2000;
+  });
+
   it('лимит запросов на пользователя → 429', async () => {
     const t = tokenFor('99999');
     const codes: number[] = [];

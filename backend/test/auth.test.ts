@@ -57,7 +57,17 @@ describe('WebAppData', () => {
 
   it('валидные данные → user.id из поля id, имя и start_param', () => {
     const r = validateWebAppData(initData(pairs({ start_param: 'kzn_0018' })), TOKEN, { nowMs: NOW });
-    assert.deepEqual(r, { ok: true, user: { userId: '67890', firstName: 'Max', startParam: 'kzn_0018' } });
+    assert.deepEqual(r, { ok: true, user: { userId: '67890', firstName: 'Max', lastName: 'User', startParam: 'kzn_0018' } });
+  });
+
+  it('профиль MAX: фамилия, ник и фото; фото только по https', () => {
+    const user = '{"id":5,"first_name":"Анна","last_name":"Петрова","username":"anna_p","photo_url":"https://i.max.ru/a.jpg"}';
+    const r = validateWebAppData(initData(pairs({ user })), TOKEN, { nowMs: NOW });
+    assert.deepEqual(r, { ok: true, user: { userId: '5', firstName: 'Анна', lastName: 'Петрова', username: 'anna_p', photoUrl: 'https://i.max.ru/a.jpg' } });
+    for (const bad of ['javascript:alert(1)', 'http://x/a.jpg', 'https://x/a.jpg" onerror="x']) {
+      const v = validateWebAppData(initData(pairs({ user: JSON.stringify({ id: 5, first_name: 'А', photo_url: bad }) })), TOKEN, { nowMs: NOW });
+      assert.ok(v.ok && v.user.photoUrl === undefined, bad);
+    }
   });
 
   it('id больше 2^53 не теряет точность', () => {

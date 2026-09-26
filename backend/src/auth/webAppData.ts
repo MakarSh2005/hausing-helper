@@ -18,6 +18,11 @@ export interface WebAppUser {
   /** user_id MAX строкой — как в users.max_user_id. */
   userId: string;
   firstName?: string;
+  lastName?: string;
+  /** Публичный ник MAX, если задан. */
+  username?: string;
+  /** Фото профиля MAX (https). */
+  photoUrl?: string;
   startParam?: string;
 }
 
@@ -73,13 +78,22 @@ export function validateWebAppData(
   // id берём из текста, а не из JSON.parse: int64 не помещается в number без потерь.
   const id = /"(?:id|user_id)"\s*:\s*"?(\d{1,20})"?/.exec(userRaw)?.[1];
   if (!id) return { ok: false, reason: 'no_user' };
-  let firstName: string | undefined;
+  let profile: Pick<WebAppUser, 'firstName' | 'lastName' | 'username' | 'photoUrl'>;
   try {
-    const u = JSON.parse(userRaw) as { first_name?: unknown };
-    if (typeof u.first_name === 'string') firstName = u.first_name.slice(0, 100);
+    const u = JSON.parse(userRaw) as Record<string, unknown>;
+    const str = (v: unknown, max: number) => (typeof v === 'string' && v.trim() ? v.trim().slice(0, max) : undefined);
+    const photo = str(u.photo_url, 1000);
+    const raw = {
+      firstName: str(u.first_name, 100),
+      lastName: str(u.last_name, 100),
+      username: str(u.username, 64),
+      // Только https: адрес потом подставляется в <img> у соседей.
+      photoUrl: photo && /^https:\/\/[^\s"'<>]+$/.test(photo) ? photo : undefined,
+    };
+    profile = Object.fromEntries(Object.entries(raw).filter(([, v]) => v !== undefined));
   } catch {
     return { ok: false, reason: 'no_user' };
   }
   const startParam = pairs.find(([k]) => k === 'start_param')?.[1];
-  return { ok: true, user: { userId: id, firstName, ...(startParam ? { startParam: startParam.slice(0, 128) } : {}) } };
+  return { ok: true, user: { userId: id, ...profile, ...(startParam ? { startParam: startParam.slice(0, 128) } : {}) } };
 }

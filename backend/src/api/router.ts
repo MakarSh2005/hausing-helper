@@ -3,7 +3,7 @@ import type { Logger } from 'pino';
 import { z } from 'zod';
 import { issueSessionToken, linkSecret, verifySessionToken } from '../auth/sessionToken.js';
 import { validateWebAppData } from '../auth/webAppData.js';
-import type { ApartmentInfo, BotStore, OrgInfo, RequestInfo } from '../bot/store.js';
+import type { ApartmentInfo, BotStore, ChatMessage, OrgInfo, RequestInfo } from '../bot/store.js';
 import { formatAddress, matchHouse } from '../domain/address.js';
 import { parseApartmentNumber } from '../bot/bot.js';
 import { complaintText } from '../domain/complaint.js';
@@ -38,6 +38,7 @@ export interface ApiDeps {
   /** Файлы фото заявок. */
   photoStorage?: PhotoStorage;
   sessionPerIpPerMin?: number;
+  chatPerMin?: number;
 }
 
 const SessionBody = z.object({ web_app_data: z.string().min(1).max(8192) });
@@ -45,6 +46,11 @@ const LinkBody = z.object({ code: z.string().min(1).max(2048) });
 const RequestId = z.string().regex(/^[A-Za-z0-9-]{1,64}$/);
 const NewRequestBody = z.object({ description: z.string().max(4000), category: z.string().max(32) });
 const SuggestBody = z.object({ description: z.string().max(4000) });
+const RatingBody = z.object({ value: z.number().int().min(1).max(5), comment: z.string().max(2000).nullable().optional() });
+const ChatBody = z.object({ text: z.string().max(4000) });
+const NotifyBody = z.object({ on: z.boolean() });
+export const MAX_CHAT_TEXT = 1000;
+export const MAX_RATING_COMMENT = 500;
 const ApartmentBody = z.object({
   house_id: z.string().regex(/^[A-Za-z0-9-]{1,64}$/),
   number: z.string().max(20),
@@ -67,7 +73,7 @@ function orgView(o: OrgInfo | null, withContacts: boolean) {
   };
 }
 
-function apartmentView(a: ApartmentInfo) {
+function apartmentView(a: ApartmentInfo, rating: { avg: number; count: number } | null = null) {
   const h = a.house;
   return {
     address: formatAddress(h),
@@ -82,8 +88,33 @@ function apartmentView(a: ApartmentInfo) {
       apartments_count: h.apartmentsCount,
       data_verified: h.verified,
     },
-    uk: orgView(h.manager, true),
+    uk: h.manager ? { ...orgView(h.manager, true)!, rating: rating ? { avg: Math.round(rating.avg * 10) / 10, count: rating.count } : null } : null,
   };
+}
+
+/** Сообщение чата дома для соседей: имя, ник и фото профиля MAX — без user_id и без квартиры. */
+function chatMessageView(m: ChatMessage) {
+  return {
+    id: m.id,
+    text: m.text,
+    deleted: m.text === null,
+    at: m.createdAt.toISOString(),
+    mine: m.mine,
+    author: {
+      key: m.author.key,
+      name: m.author.name ?? 'Сосед',
+      username: m.author.username,
+      photo_url: m.author.photoUrl,
+    },
+  };
+}
+
+/** Пробелы по краям, не больше двух пустых строк подряд, без управляющих символов. */
+export function cleanChatText(raw: string): string {
+  return raw
+    .replace(/[\u0000-\u0008\u000B-\u001F\u007F\u200B-\u200F\u202A-\u202E\u2066-\u2069]/g, '')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
 }
 
 function requestView(r: RequestInfo, now: Date, demo: boolean) {
@@ -103,6 +134,9 @@ function requestView(r: RequestInfo, now: Date, demo: boolean) {
     // «Проблема решена» — по открытой; жалоба в ГЖИ — когда срок истёк
     can_resolve: open,
     can_complain: open && r.dueAt <= now,
+    // Оценка — после выполнения (не после отзыва или отказа), один раз
+    can_rate: r.status === 'completed' && !r.rating,
+    rating: r.rating ? { value: r.rating.value, comment: r.rating.comment, at: r.rating.at.toISOString() } : null,
     created_at: r.createdAt.toISOString(),
     due_at: r.dueAt.toISOString(),
     overdue: open && r.dueAt <= now,
@@ -114,7 +148,7 @@ function requestView(r: RequestInfo, now: Date, demo: boolean) {
     timeline: requestTimeline(r, now, demo).map((e) => ({
       type: e.type,
       at: e.at.toISOString(),
-      label: TIMELINE_LABEL[e.type],
+      label: e.type === 'rated' && r.rating ? `Ваша оценка: ${r.rating.value} из 5` : TIMELINE_LABEL[e.type],
       future: !!e.future,
       demo: !!e.demo,
     })),
@@ -125,8 +159,10 @@ export function createApiRouter(deps: ApiDeps) {
   const log = deps.logger.child({ module: 'api' });
   const clock = deps.now ?? (() => new Date());
   const userLimiter = new SlidingWindowLimiter(deps.perUserPerMin ?? 60);
+  // Чат: не больше 10 сообщений в минуту от одного жильца — против флуда.
+  const chatLimiter = new SlidingWindowLimiter(deps.chatPerMin ?? 10);
   const ipLimiter = new SlidingWindowLimiter(deps.sessionPerIpPerMin ?? 30);
-  setInterval(() => (userLimiter.sweep(), ipLimiter.sweep()), 60_000).unref();
+  setInterval(() => (userLimiter.sweep(), ipLimiter.sweep(), chatLimiter.sweep()), 60_000).unref();
 
   const router = express.Router();
 
@@ -152,7 +188,8 @@ export function createApiRouter(deps: ApiDeps) {
       res.status(401).json({ error: 'invalid_web_app_data', reason: v.reason });
       return;
     }
-    await deps.store.ensureUser(v.user.userId, v.user.firstName);
+    const name = [v.user.firstName, v.user.lastName].filter(Boolean).join(' ') || undefined;
+    await deps.store.ensureUser(v.user.userId, { name, username: v.user.username ?? '', photoUrl: v.user.photoUrl ?? '' });
     const token = issueSessionToken(v.user.userId, deps.sessionSecret, deps.sessionTtlSec, clock().getTime());
     log.info({ userId: v.user.userId }, 'api: вход в мини-приложение');
     res.json({ token, expires_in: deps.sessionTtlSec, user: { first_name: v.user.firstName ?? null } });
@@ -198,7 +235,7 @@ export function createApiRouter(deps: ApiDeps) {
 
   router.get('/me', auth, async (_req, res: Response<unknown, Locals>) => {
     const a = await deps.store.getApartment(res.locals.userId);
-    res.json({ apartment: a ? apartmentView(a) : null });
+    res.json({ apartment: a ? apartmentView(a, await deps.store.ukRating(res.locals.userId)) : null });
   });
 
   // ── смена адреса (то же, что «Сменить адрес» в боте) ────────────────────
@@ -248,7 +285,7 @@ export function createApiRouter(deps: ApiDeps) {
     await deps.store.saveApartment(res.locals.userId, { houseId: house.id, number, entrance });
     log.info({ userId: res.locals.userId, house: house.code }, 'api: адрес изменён в мини-приложении');
     const a = await deps.store.getApartment(res.locals.userId);
-    res.json({ apartment: a ? apartmentView(a) : null });
+    res.json({ apartment: a ? apartmentView(a, await deps.store.ukRating(res.locals.userId)) : null });
   });
 
   router.get('/requests', auth, async (_req, res: Response<unknown, Locals>) => {
@@ -428,6 +465,109 @@ export function createApiRouter(deps: ApiDeps) {
     }
     log.info({ userId: res.locals.userId, number: r?.number }, `api: заявка ${r?.number} отозвана жильцом`);
     res.json(requestView(r!, clock(), !!deps.demoStatuses));
+  });
+
+  // ── оценка после закрытия ───────────────────────────────────────────────
+
+  router.post('/requests/:id/rating', auth, express.json({ limit: '8kb' }), async (req, res: Response<unknown, Locals>) => {
+    const id = RequestId.safeParse(req.params.id);
+    const body = RatingBody.safeParse(req.body);
+    if (!id.success) {
+      res.status(404).json({ error: 'not_found' });
+      return;
+    }
+    if (!body.success) {
+      res.status(400).json({ error: 'bad_rating' });
+      return;
+    }
+    const comment = cleanChatText(body.data.comment ?? '').slice(0, MAX_RATING_COMMENT) || null;
+    const result = await deps.store.rateRequest(res.locals.userId, id.data, { value: body.data.value, comment }, clock());
+    if (result === 'not_found') {
+      res.status(404).json({ error: 'not_found' });
+      return;
+    }
+    const r = await deps.store.getRequest(res.locals.userId, id.data);
+    if (result !== 'ok') {
+      res.status(409).json({ error: result, request: r ? requestView(r, clock(), !!deps.demoStatuses) : null });
+      return;
+    }
+    log.info({ userId: res.locals.userId, number: r?.number, rating: body.data.value }, `api: заявка ${r?.number} оценена на ${body.data.value}`);
+    res.json(requestView(r!, clock(), !!deps.demoStatuses));
+  });
+
+  // ── чат дома ────────────────────────────────────────────────────────────
+  // Участники — жильцы с привязанной квартирой в доме. Соседям видны имя, ник и фото профиля MAX;
+  // user_id MAX и номер квартиры не отдаются никому.
+
+  router.get('/chat', auth, async (req, res: Response<unknown, Locals>) => {
+    const beforeRaw = typeof req.query.before === 'string' ? new Date(req.query.before) : null;
+    const before = beforeRaw && !Number.isNaN(beforeRaw.getTime()) ? beforeRaw : undefined;
+    const [view, apt, chatId] = await Promise.all([
+      deps.store.chatView(res.locals.userId, { limit: 50, before }),
+      deps.store.getApartment(res.locals.userId),
+      deps.store.getChatId(res.locals.userId),
+    ]);
+    if (!view || !apt) {
+      res.json({ available: false });
+      return;
+    }
+    // Открыли чат (первая страница) — всё прочитано.
+    if (!before) await deps.store.markChatRead(res.locals.userId, clock());
+    res.json({
+      available: true,
+      address: formatAddress(apt.house),
+      members: view.members,
+      notify: view.notify,
+      // Уведомления приходят сообщением от бота — нужен диалог с ним.
+      can_notify: !!chatId,
+      has_more: view.hasMore,
+      last_read_at: view.lastReadAt?.toISOString() ?? null,
+      max_text: MAX_CHAT_TEXT,
+      messages: view.messages.map(chatMessageView),
+    });
+  });
+
+  router.get('/chat/unread', auth, async (_req, res: Response<unknown, Locals>) => {
+    res.json({ count: await deps.store.chatUnread(res.locals.userId) });
+  });
+
+  router.post('/chat', auth, express.json({ limit: '16kb' }), async (req, res: Response<unknown, Locals>) => {
+    const body = ChatBody.safeParse(req.body);
+    const text = body.success ? cleanChatText(body.data.text) : '';
+    if (!text) {
+      res.status(400).json({ error: 'empty' });
+      return;
+    }
+    if (text.length > MAX_CHAT_TEXT) {
+      res.status(400).json({ error: 'too_long' });
+      return;
+    }
+    if (!chatLimiter.allow(res.locals.userId)) {
+      res.status(429).json({ error: 'too_fast' });
+      return;
+    }
+    const m = await deps.store.postChat(res.locals.userId, text, clock());
+    if (!m) {
+      res.status(409).json({ error: 'no_apartment' });
+      return;
+    }
+    res.status(201).json(chatMessageView(m));
+  });
+
+  router.delete('/chat/:id', auth, async (req, res: Response<unknown, Locals>) => {
+    const id = RequestId.safeParse(req.params.id);
+    const ok = id.success && (await deps.store.deleteChat(res.locals.userId, id.data, clock()));
+    res.status(ok ? 200 : 404).json(ok ? { ok: true } : { error: 'not_found' });
+  });
+
+  router.put('/chat/notify', auth, express.json({ limit: '1kb' }), async (req, res: Response<unknown, Locals>) => {
+    const body = NotifyBody.safeParse(req.body);
+    if (!body.success) {
+      res.status(400).json({ error: 'bad_request' });
+      return;
+    }
+    await deps.store.setChatNotify(res.locals.userId, body.data.on);
+    res.json({ notify: body.data.on });
   });
 
   router.use((_req, res) => {

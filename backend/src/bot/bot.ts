@@ -55,7 +55,12 @@ export function appPayload(path?: string): string | undefined {
 export type Bot = ((ev: ParsedEvent) => Promise<void>) & {
   /** Разослать напоминания по просроченным заявкам. Возвращает число отправленных. */
   remindOverdue(): Promise<number>;
+  /** Разослать сводки чата дома тем, кто включил уведомления. Возвращает число отправленных. */
+  notifyChat(): Promise<number>;
 };
+
+/** Сводка чата дома — не чаще раза в 10 минут на жильца. */
+export const CHAT_QUIET_MS = 10 * 60_000;
 
 const P = {
   house: 'onb:house:', // + houseId — выбран/подтверждён дом
@@ -276,6 +281,7 @@ export function createBot(deps: { store: BotStore; io: BotIO; logger: Logger; op
         ...contactsLines(a.house),
         '',
         'Подать заявку с фото и следить за ней можно в приложении.',
+        'Там же чат дома — вы уже в нём вместе с соседями.',
       ].join('\n'),
     );
   }
@@ -309,6 +315,26 @@ export function createBot(deps: { store: BotStore; io: BotIO; logger: Logger; op
         log.warn({ number: r.number }, `bot: не удалось отправить напоминание по заявке ${r.number} — ${describeError(err)}`);
       }
     }
+    return sent;
+  }
+
+  // ─── сводка чата дома ────────────────────────────────────────────────────
+
+  async function notifyChat(): Promise<number> {
+    const now = clock();
+    let sent = 0;
+    for (const d of await store.chatDigests(now, CHAT_QUIET_MS)) {
+      // Сначала отмечаем: при сбое сводка потеряется, но не задвоится.
+      await store.markChatNotified(d.maxUserId, now);
+      try {
+        const app = appButton(d.maxUserId, 'Открыть чат дома', 'chat');
+        await io.send(d.chatId, chatDigestText(d.count, d.last), app ? [[app]] : undefined);
+        sent++;
+      } catch (err) {
+        log.warn({ userId: d.maxUserId }, `bot: не удалось отправить сводку чата — ${describeError(err)}`);
+      }
+    }
+    if (sent) log.info(`bot: сводки чата дома отправлены — ${sent}`);
     return sent;
   }
 
@@ -472,5 +498,16 @@ export function createBot(deps: { store: BotStore; io: BotIO; logger: Logger; op
     return run;
   };
 
-  return Object.assign(handle, { remindOverdue });
+  return Object.assign(handle, { remindOverdue, notifyChat });
+}
+
+export function chatDigestText(count: number, last: { name: string | null; text: string }): string {
+  const text = last.text.replace(/\s+/g, ' ').trim();
+  const short = text.length > 200 ? `${text.slice(0, 199)}…` : text;
+  return [
+    `Чат дома: ${count} ${plural(count, 'новое сообщение', 'новых сообщения', 'новых сообщений')}.`,
+    `${last.name ?? 'Сосед'}: ${short}`,
+    '',
+    'Выключить эти уведомления можно в чате дома в приложении.',
+  ].join('\n');
 }

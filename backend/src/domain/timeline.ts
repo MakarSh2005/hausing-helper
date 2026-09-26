@@ -7,7 +7,7 @@ import { DEMO_STAGES, OPEN_STATUSES, STATUS_LABEL } from './requestStatus.js';
  * заявки (создана, срок, напоминание, закрыта) и демо-этапов статуса — так же, как effectiveStatus.
  */
 
-export type TimelineType = 'created' | 'accepted' | 'in_progress' | 'due' | 'overdue' | 'reminded' | 'completed' | 'rejected' | 'cancelled';
+export type TimelineType = 'created' | 'accepted' | 'in_progress' | 'due' | 'overdue' | 'reminded' | 'completed' | 'rejected' | 'cancelled' | 'rated';
 
 export interface TimelineEvent {
   type: TimelineType;
@@ -24,6 +24,7 @@ interface RequestLike {
   dueAt: Date;
   reminderSentAt: Date | null;
   updatedAt: Date;
+  rating?: { value: number; at: Date } | null;
 }
 
 export function requestTimeline(r: RequestLike, now: Date, demo: boolean): TimelineEvent[] {
@@ -49,6 +50,7 @@ export function requestTimeline(r: RequestLike, now: Date, demo: boolean): Timel
   }
   if (r.reminderSentAt) events.push({ type: 'reminded', at: r.reminderSentAt });
   if (!open) events.push({ type: r.status as 'completed' | 'rejected' | 'cancelled', at: r.updatedAt });
+  if (r.rating) events.push({ type: 'rated', at: r.rating.at });
 
   return events.sort((a, b) => a.at.getTime() - b.at.getTime());
 }
@@ -63,6 +65,7 @@ export const TIMELINE_LABEL: Record<TimelineType, string> = {
   completed: 'Проблема решена',
   rejected: 'Заявка отклонена',
   cancelled: 'Заявка отозвана',
+  rated: 'Вы оценили работу',
 };
 
 export interface Notification {

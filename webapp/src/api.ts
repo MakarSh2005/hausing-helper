@@ -23,7 +23,7 @@ export interface Apartment {
     apartments_count: number | null;
     data_verified: boolean;
   };
-  uk: Org | null;
+  uk: (Org & { rating: { avg: number; count: number } | null }) | null;
 }
 
 export type Status = 'created' | 'accepted' | 'in_progress' | 'completed' | 'rejected' | 'cancelled';
@@ -47,6 +47,8 @@ export interface RequestItem {
   photos: Array<{ id: string; available: boolean }>;
   can_resolve: boolean;
   can_complain: boolean;
+  can_rate: boolean;
+  rating: { value: number; comment: string | null; at: string } | null;
   timeline: Array<{ type: string; at: string; label: string; future: boolean; demo: boolean }>;
 }
 
@@ -280,7 +282,73 @@ async function setApartment(body: { house_id: string; number: string; entrance: 
   throw new NetworkError(`http ${res.status}`);
 }
 
+/** Оценка выполненной заявки. already / not_completed — сервер вернёт актуальную заявку. */
+async function rateRequest(id: string, value: number, comment: string): Promise<{ ok: boolean; request: RequestItem | null }> {
+  const res = await postJson(`/api/requests/${encodeURIComponent(id)}/rating`, { value, comment: comment.trim() || null });
+  const b = (await res.json().catch(() => null)) as (RequestItem & { request?: RequestItem }) | null;
+  if (res.ok) return { ok: true, request: b };
+  if (res.status === 409) return { ok: false, request: b?.request ?? null };
+  throw new NetworkError(`http ${res.status}`);
+}
+
+// ─── чат дома ────────────────────────────────────────────────────────────
+
+export interface ChatAuthor {
+  key: string;
+  name: string;
+  username: string | null;
+  photo_url: string | null;
+}
+export interface ChatMsg {
+  id: string;
+  text: string | null;
+  deleted: boolean;
+  at: string;
+  mine: boolean;
+  author: ChatAuthor;
+}
+export type ChatData =
+  | { available: false }
+  | {
+      available: true;
+      address: string;
+      members: number;
+      notify: boolean;
+      can_notify: boolean;
+      has_more: boolean;
+      last_read_at: string | null;
+      max_text: number;
+      messages: ChatMsg[];
+    };
+export type ChatSendError = 'empty' | 'too_long' | 'too_fast' | 'no_apartment';
+
+async function chatSend(text: string): Promise<{ ok: true; message: ChatMsg } | { ok: false; error: ChatSendError }> {
+  const res = await postJson('/api/chat', { text });
+  const b = (await res.json().catch(() => null)) as (ChatMsg & { error?: ChatSendError }) | null;
+  if (res.status === 201 && b) return { ok: true, message: b };
+  if (b?.error && res.status < 500) return { ok: false, error: b.error };
+  throw new NetworkError(`http ${res.status}`);
+}
+
+async function chatDelete(id: string): Promise<boolean> {
+  const res = await authed(`/api/chat/${encodeURIComponent(id)}`, { method: 'DELETE' });
+  if (res.status >= 500) throw new NetworkError(`http ${res.status}`);
+  return res.ok;
+}
+
+async function chatNotify(on: boolean): Promise<boolean> {
+  const res = await authed('/api/chat/notify', { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ on }) });
+  if (!res.ok) throw new NetworkError(`http ${res.status}`);
+  return ((await res.json()) as { notify: boolean }).notify;
+}
+
 export const api = {
+  rate: rateRequest,
+  chat: (before?: string) => get<ChatData>(`/api/chat${before ? `?before=${encodeURIComponent(before)}` : ''}`),
+  chatUnread: () => get<{ count: number }>('/api/chat/unread'),
+  chatSend,
+  chatDelete,
+  chatNotify,
   photo: photoBlob,
   cancel: cancelRequest,
   create: createRequest,

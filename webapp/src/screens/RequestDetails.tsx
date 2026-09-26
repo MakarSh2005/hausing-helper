@@ -54,6 +54,112 @@ function CancelBlock({ onCancel }: { onCancel: () => Promise<string | null> }) {
   );
 }
 
+const RATING_WORD = ['', 'Плохо', 'Так себе', 'Нормально', 'Хорошо', 'Отлично'];
+
+function Stars({ value, onPick, disabled }: { value: number; onPick?: (v: number) => void; disabled?: boolean }) {
+  if (!onPick) {
+    return (
+      <span className="stars stars--static" role="img" aria-label={`${value} из 5`}>
+        {[1, 2, 3, 4, 5].map((i) => (
+          <span key={i} className={`star${i <= value ? ' star--on' : ''}`} aria-hidden="true">
+            ★
+          </span>
+        ))}
+      </span>
+    );
+  }
+  return (
+    <div className="stars" role="radiogroup" aria-label="Оценка">
+      {[1, 2, 3, 4, 5].map((i) => (
+        <button
+          key={i}
+          role="radio"
+          aria-checked={i === value}
+          aria-label={`${i} из 5 — ${RATING_WORD[i]}`}
+          className={`star${i <= value ? ' star--on' : ''}`}
+          disabled={disabled}
+          onClick={() => onPick(i)}
+        >
+          ★
+        </button>
+      ))}
+    </div>
+  );
+}
+
+/** Оценка после выполнения: звёзды и необязательный комментарий. Ставится один раз. */
+function RatingBlock({ r, onUpdated }: { r: RequestItem; onUpdated: (r: RequestItem) => void }) {
+  const [value, setValue] = useState(0);
+  const [comment, setComment] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  if (r.rating) {
+    return (
+      <section className="card" aria-labelledby="rating-title">
+        <span id="rating-title" className="field__label">
+          Ваша оценка
+        </span>
+        <div className="rating-row">
+          <Stars value={r.rating.value} />
+          <span className="field__value">{RATING_WORD[r.rating.value]}</span>
+        </div>
+        {r.rating.comment && <p className="field__value rating-comment">{r.rating.comment}</p>}
+        <span className="field__label">Оценки жильцов видны в карточке управляющей компании на вкладке «Квартира».</span>
+      </section>
+    );
+  }
+  if (!r.can_rate) return null;
+
+  async function send() {
+    if (!value) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const res = await api.rate(r.id, value, comment);
+      if (res.request) onUpdated(res.request);
+      else if (!res.ok) setError('Не удалось сохранить оценку.');
+    } catch {
+      setError('Нет связи с сервером. Попробуйте ещё раз.');
+    }
+    setBusy(false);
+  }
+
+  return (
+    <section className="card" aria-labelledby="rate-title">
+      <div id="rate-title" className="field__value" style={{ fontWeight: 600 }}>
+        Как управляющая компания справилась?
+      </div>
+      <div className="rating-row">
+        <Stars value={value} onPick={setValue} disabled={busy} />
+        <span className="field__value">{RATING_WORD[value] ?? ''}</span>
+      </div>
+      {value > 0 && (
+        <>
+          <textarea
+            className="input"
+            rows={2}
+            maxLength={500}
+            placeholder={value <= 3 ? 'Что пошло не так? Необязательно' : 'Пара слов для соседей — необязательно'}
+            value={comment}
+            onChange={(e) => setComment(e.target.value)}
+            disabled={busy}
+            aria-label="Комментарий к оценке"
+          />
+          <Button size="medium" stretched loading={busy} onClick={() => void send()}>
+            Отправить оценку
+          </Button>
+        </>
+      )}
+      {error && (
+        <p className="field__value field__value--negative" style={{ margin: '8px 0 0', fontSize: 14 }} role="alert">
+          {error}
+        </p>
+      )}
+    </section>
+  );
+}
+
 /** «Не решена»: готовый текст жалобы в ГЖИ с кнопкой «Скопировать». */
 function ComplaintBlock({ id }: { id: string }) {
   const [data, setData] = useState<{ text: string; where: string; note: string } | null>(null);
@@ -118,12 +224,14 @@ export function RequestDetails({
   onCancel,
   onResolve,
   onChanged,
+  onUpdated,
 }: {
   r: RequestItem;
   maxPhotos: number;
   onCancel: () => Promise<string | null>;
   onResolve: () => Promise<void>;
   onChanged: () => void;
+  onUpdated: (r: RequestItem) => void;
 }) {
   const [resolving, setResolving] = useState(false);
   const open = r.can_cancel;
@@ -138,6 +246,8 @@ export function RequestDetails({
           {r.number} · подана {dateTime(r.created_at)}
         </span>
       </section>
+
+      <RatingBlock r={r} onUpdated={onUpdated} />
 
       <section className="card">
         <Field label="Проблема">{r.description}</Field>

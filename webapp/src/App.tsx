@@ -5,12 +5,13 @@ import { notifSeen } from './store';
 import { insideMax, openBotChat, startParam, tap, webApp } from './bridge';
 import { Apartment } from './screens/Apartment';
 import { ChangeAddress } from './screens/ChangeAddress';
+import { Chat } from './screens/Chat';
 import { NewRequest } from './screens/NewRequest';
 import { RequestDetails } from './screens/RequestDetails';
 import { Requests } from './screens/Requests';
 import { Loading, StateScreen } from './ui';
 
-type Route = { name: 'requests' } | { name: 'request'; id: string } | { name: 'apartment' } | { name: 'new' } | { name: 'notifications' } | { name: 'address' };
+type Route = { name: 'requests' } | { name: 'request'; id: string } | { name: 'apartment' } | { name: 'new' } | { name: 'notifications' } | { name: 'address' } | { name: 'chat' };
 
 const BASE = '/app/';
 
@@ -22,6 +23,7 @@ function parseRoute(pathname: string): Route {
   if (/^new\/?$/.test(rest)) return { name: 'new' };
   if (/^notifications\/?$/.test(rest)) return { name: 'notifications' };
   if (/^address\/?$/.test(rest)) return { name: 'address' };
+  if (/^chat\/?$/.test(rest)) return { name: 'chat' };
   return { name: 'requests' };
 }
 /** Экран из параметра запуска бота: «apartment» или «req_<id>». */
@@ -34,12 +36,13 @@ function initialRoute(): Route {
   if (p === 'apartment') return { name: 'apartment' };
   if (p === 'new') return { name: 'new' };
   if (p === 'address') return { name: 'address' };
+  if (p === 'chat') return { name: 'chat' };
   return fromPath;
 }
 const routePath = (r: Route) =>
   BASE + (r.name === 'request' ? `requests/${r.id}` : r.name === 'requests' ? '' : r.name);
 /** Экраны без вкладок, с кнопкой «Назад». */
-const isInner = (r: Route) => r.name === 'request' || r.name === 'new' || r.name === 'notifications' || r.name === 'address';
+const isInner = (r: Route) => r.name === 'request' || r.name === 'new' || r.name === 'notifications' || r.name === 'address' || r.name === 'chat';
 
 type Phase =
   | { kind: 'auth' }
@@ -63,6 +66,7 @@ export function App() {
   /** Граница «новых» на экране уведомлений — до того, как отметили их просмотренными. */
   const [seenBefore, setSeenBefore] = useState(0);
   const [newCategory, setNewCategory] = useState<string | null>(null);
+  const [chatUnread, setChatUnread] = useState(0);
 
   const fail = useCallback((err: unknown, set: (d: Data<never>) => void) => {
     if (err instanceof AuthError) setPhase({ kind: 'auth_error', problem: err.problem });
@@ -100,6 +104,7 @@ export function App() {
   // Уведомления: при входе, раз в минуту и при возвращении в приложение
   const loadNotifs = useCallback(() => {
     api.notifications().then((r) => setNotifs(r.items), () => {});
+    api.chatUnread().then((r) => setChatUnread(r.count), () => {});
   }, []);
   useEffect(() => {
     if (phase.kind !== 'ready') return;
@@ -185,6 +190,8 @@ export function App() {
   }, [route, back]);
 
   const writeBot = () => openBotChat(bot);
+  const onChatAuthError = useCallback((e: AuthError) => setPhase({ kind: 'auth_error', problem: e.problem }), []);
+  const onChatRead = useCallback(() => setChatUnread(0), []);
 
   /** Заявка подана: открываем её карточку вместо формы (форма не остаётся в истории — «Назад» ведёт к списку). */
   const onCreated = (r: RequestItem, note: string | null) => {
@@ -273,8 +280,9 @@ export function App() {
     go({ name: 'new' });
   };
 
+  const showFab = !isInner(route);
   return (
-    <main className="page">
+    <main className={`page${showFab ? ' page--fab' : ''}`}>
       <div className="page__inner">
       <Header
         apartment={apartment.status === 'ok' ? apartment.value : null}
@@ -299,12 +307,14 @@ export function App() {
           </a>
         </div>
       )}
-      {(route.name === 'new' || route.name === 'notifications' || route.name === 'address') && (
+      {(route.name === 'new' || route.name === 'notifications' || route.name === 'address' || route.name === 'chat') && (
         <h1 className="gutter" style={{ fontSize: 22, margin: '0 0 12px', color: 'var(--text-primary)' }}>
           {route.name === 'new'
             ? 'Новая заявка'
             : route.name === 'notifications'
               ? 'Уведомления'
+              : route.name === 'chat'
+                ? 'Чат дома'
               : apartment.status === 'ok' && apartment.value
                 ? 'Сменить адрес'
                 : 'Указать адрес'}
@@ -342,6 +352,12 @@ export function App() {
               onCancel={() => cancel(r.id)}
               onResolve={() => resolve(r.id)}
               onChanged={() => void reloadDetail(r.id)}
+              onUpdated={(u) => {
+                setDetail({ status: 'ok', value: u });
+                setRequests((d) => (d.status === 'ok' ? { status: 'ok', value: d.value.map((x) => (x.id === u.id ? u : x)) } : d));
+                setBanner(u.rating ? { text: 'Спасибо! Оценка сохранена.' } : null);
+                tap();
+              }}
             />
           )}
         </DataView>
@@ -373,6 +389,7 @@ export function App() {
           {(a) => <Apartment apartment={a} onChangeAddress={() => go({ name: 'address' })} />}
         </DataView>
       )}
+      {route.name === 'chat' && <Chat onAuthError={onChatAuthError} onNoAddress={() => go({ name: 'address' })} onRead={onChatRead} />}
       {route.name === 'address' && (
         <DataView data={apartment} retry={loadApartment}>
           {(a) => (
@@ -386,6 +403,17 @@ export function App() {
         </DataView>
       )}
       </div>
+      {showFab && (
+        <button className="chat-fab" onClick={() => go({ name: 'chat' })} aria-label={chatUnread ? `Чат дома: ${chatUnread} новых` : 'Чат дома'}>
+          <svg width="26" height="26" viewBox="0 0 24 24" aria-hidden="true">
+            <path
+              d="M4 4h16a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H9l-4.4 3.5A1 1 0 0 1 3 20.7V6a2 2 0 0 1 1-2Zm3 6.2a1.3 1.3 0 1 0 0 2.6 1.3 1.3 0 0 0 0-2.6Zm5 0a1.3 1.3 0 1 0 0 2.6 1.3 1.3 0 0 0 0-2.6Zm5 0a1.3 1.3 0 1 0 0 2.6 1.3 1.3 0 0 0 0-2.6Z"
+              fill="currentColor"
+            />
+          </svg>
+          {chatUnread > 0 && <span className="bell__badge">{chatUnread > 9 ? '9+' : chatUnread}</span>}
+        </button>
+      )}
     </main>
   );
 }

@@ -47,7 +47,11 @@ export function uiPlatform(): 'ios' | 'android' {
 
 /** Открыть чат с ботом: внутри MAX — средствами клиента, иначе обычной ссылкой. */
 export function openBotChat(username: string | null) {
-  const url = `https://max.ru/${username ?? ''}`;
+  openMaxUrl(`https://max.ru/${username ?? ''}`);
+}
+
+/** Ссылка вида https://max.ru/… : внутри MAX — средствами клиента, иначе обычным переходом. */
+export function openMaxUrl(url: string) {
   const w = webApp();
   if (insideMax() && w?.openMaxLink) {
     w.openMaxLink(url);

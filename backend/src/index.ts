@@ -103,6 +103,8 @@ async function main() {
     bot
       .remindOverdue()
       .catch((err) => logger.error(`напоминания: ошибка — ${describeError(err)}`))
+      .then(() => bot.notifyChat())
+      .catch((err) => logger.error(`чат дома: ошибка сводки — ${describeError(err)}`))
       .finally(() => (reminding = false));
   }, 60_000);
   reminders.unref();

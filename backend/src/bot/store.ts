@@ -75,6 +75,58 @@ export interface RequestInfo {
   /** Дом заявки (не меняется при перепривязке квартиры). */
   house: HouseInfo;
   photos: StoredPhoto[];
+  /** Оценка жильца после закрытия; null — ещё не оценена. */
+  rating: RatingInfo | null;
+}
+
+export interface RatingInfo {
+  value: number;
+  comment: string | null;
+  at: Date;
+}
+
+/** Профиль MAX: имя, публичный ник (если задан) и фото — из данных запуска мини-приложения. */
+export interface UserProfile {
+  name?: string;
+  username?: string;
+  photoUrl?: string;
+}
+
+/** Автор сообщения в чате дома. key — внутренний id, не user_id MAX: его соседям не отдаём. */
+export interface ChatAuthor {
+  key: string;
+  name: string | null;
+  username: string | null;
+  photoUrl: string | null;
+}
+
+export interface ChatMessage {
+  id: string;
+  /** null — сообщение удалено автором. */
+  text: string | null;
+  createdAt: Date;
+  author: ChatAuthor;
+  mine: boolean;
+}
+
+export interface ChatView {
+  houseId: string;
+  /** Сколько жильцов с привязанной квартирой в доме — все они участники чата. */
+  members: number;
+  /** Старые сверху. */
+  messages: ChatMessage[];
+  /** Есть сообщения раньше самого старого из messages. */
+  hasMore: boolean;
+  notify: boolean;
+  lastReadAt: Date | null;
+}
+
+/** Сводка для уведомления ботом: новые сообщения соседей с прошлого прочтения или прошлой сводки. */
+export interface ChatDigest {
+  maxUserId: string;
+  chatId: string;
+  count: number;
+  last: { name: string | null; text: string };
 }
 
 export interface NewRequest {
@@ -96,7 +148,7 @@ export interface OverdueQuery {
 
 export interface BotStore {
   /** Создать пользователя, если его ещё нет (вход в мини-приложение раньше первого сообщения боту). */
-  ensureUser(maxUserId: string, name?: string): Promise<void>;
+  ensureUser(maxUserId: string, profile?: UserProfile): Promise<void>;
   listHouses(): Promise<HouseInfo[]>;
   getHouse(id: string): Promise<HouseInfo | null>;
   getHouseByCode(code: string): Promise<HouseInfo | null>;
@@ -135,6 +187,25 @@ export interface BotStore {
   houseActivity(maxUserId: string, since: Date): Promise<Array<{ category: RequestCategory; createdAt: Date }>>;
   /** chat_id диалога с пользователем — чтобы бот мог написать первым. */
   getChatId(maxUserId: string): Promise<string | null>;
+
+  /** Оценка своей заявки: только выполненной и только один раз. */
+  rateRequest(maxUserId: string, id: string, r: { value: number; comment: string | null }, at: Date): Promise<'ok' | 'not_found' | 'not_completed' | 'already'>;
+  /** Средняя оценка УК текущего дома жильца по всем оценённым заявкам; null — оценок нет. */
+  ukRating(maxUserId: string): Promise<{ avg: number; count: number } | null>;
+
+  /** Чат дома жильца; null — квартира не привязана. */
+  chatView(maxUserId: string, opts: { limit: number; before?: Date }): Promise<ChatView | null>;
+  /** null — квартира не привязана. */
+  postChat(maxUserId: string, text: string, at: Date): Promise<ChatMessage | null>;
+  /** Удалить своё сообщение (текст стирается). false — не найдено или чужое. */
+  deleteChat(maxUserId: string, id: string, at: Date): Promise<boolean>;
+  setChatNotify(maxUserId: string, on: boolean): Promise<void>;
+  markChatRead(maxUserId: string, at: Date): Promise<void>;
+  /** Непрочитанные сообщения соседей в чате своего дома. */
+  chatUnread(maxUserId: string): Promise<number>;
+  /** Кому пора прислать сводку: уведомления включены, есть новое, прошлая сводка была раньше quietMs. */
+  chatDigests(now: Date, quietMs: number): Promise<ChatDigest[]>;
+  markChatNotified(maxUserId: string, at: Date): Promise<void>;
 }
 
 export const IDLE: Session = { state: 'idle', data: {} };
@@ -163,6 +234,7 @@ type RequestRow = {
   id: string; number: string; category: string; description: string; status: string;
   createdAt: Date; dueAt: Date; reminderSentAt: Date | null; updatedAt: Date;
   address: string | null;
+  rating: number | null; ratingComment: string | null; ratedAt: Date | null;
   organization: OrgRow | null;
   house: HouseRow;
   apartment: { number: string; entrance: number | null };
@@ -187,6 +259,7 @@ function toRequest(r: RequestRow): RequestInfo {
     photos: r.attachments.filter((a) => a.type === 'image').map((a) => decodeRef(a.id, a.ref)),
     // Заявки до появления снимка адреса: собираем из дома заявки и текущего номера квартиры.
     address: r.address ?? `${formatAddress(r.house)}, кв. ${r.apartment.number}`,
+    rating: r.rating != null && r.ratedAt ? { value: r.rating, comment: r.ratingComment, at: r.ratedAt } : null,
   };
 }
 
@@ -220,11 +293,17 @@ export function createPrismaStore(db: Db, opts: { cacheMs?: number } = {}): BotS
   };
 
   return {
-    async ensureUser(maxUserId, name) {
+    async ensureUser(maxUserId, p = {}) {
+      // Профиль обновляем при каждом входе: жилец мог сменить имя или фото в MAX.
+      const profile = {
+        ...(p.name ? { name: p.name } : {}),
+        ...(p.username !== undefined ? { username: p.username || null } : {}),
+        ...(p.photoUrl !== undefined ? { photoUrl: p.photoUrl || null } : {}),
+      };
       await db.user.upsert({
         where: { maxUserId },
-        create: { maxUserId, name: name ?? null },
-        update: { lastSeenAt: new Date() },
+        create: { maxUserId, name: p.name ?? null, username: p.username ?? null, photoUrl: p.photoUrl ?? null },
+        update: { lastSeenAt: new Date(), ...profile },
       });
     },
     async listHouses() {
@@ -263,6 +342,12 @@ export function createPrismaStore(db: Db, opts: { cacheMs?: number } = {}): BotS
     },
     async saveApartment(maxUserId, a) {
       const id = await userId(maxUserId);
+      const prev = await db.apartment.findUnique({ where: { userId: id }, select: { houseId: true } });
+      // Новый дом — новый чат: всё, что написано до вступления, считаем прочитанным.
+      if (prev?.houseId !== a.houseId) {
+        const now = new Date();
+        await db.houseChatState.upsert({ where: { userId: id }, create: { userId: id, lastReadAt: now }, update: { lastReadAt: now, lastNotifiedAt: null } });
+      }
       await db.apartment.upsert({
         where: { userId: id },
         create: { userId: id, houseId: a.houseId, number: a.number, entrance: a.entrance },
@@ -375,5 +460,127 @@ export function createPrismaStore(db: Db, opts: { cacheMs?: number } = {}): BotS
       const res = await db.request.updateMany({ where: { id, reminderSentAt: null }, data: { reminderSentAt: at } });
       return res.count === 1;
     },
+
+    async rateRequest(maxUserId, id, r, at) {
+      const uid = await userId(maxUserId);
+      const x = await db.request.findFirst({ where: { id, userId: uid }, select: { status: true, rating: true, updatedAt: true } });
+      if (!x) return 'not_found';
+      if (x.rating != null) return 'already';
+      if (x.status !== 'completed') return 'not_completed';
+      // updatedAt — время закрытия (по нему строится хронология), оценка его не сдвигает.
+      // Условие rating: null — в самом запросе: две оценки подряд не перезапишут друг друга.
+      const res = await db.request.updateMany({
+        where: { id, userId: uid, status: 'completed', rating: null },
+        data: { rating: r.value, ratingComment: r.comment, ratedAt: at, updatedAt: x.updatedAt },
+      });
+      return res.count === 1 ? 'ok' : 'already';
+    },
+    async ukRating(maxUserId) {
+      const apt = await db.apartment.findUnique({ where: { userId: await userId(maxUserId) }, select: { house: { select: { managerId: true } } } });
+      const orgId = apt?.house.managerId;
+      if (!orgId) return null;
+      const agg = await db.request.aggregate({ where: { organizationId: orgId, rating: { not: null } }, _avg: { rating: true }, _count: { rating: true } });
+      return agg._count.rating ? { avg: agg._avg.rating ?? 0, count: agg._count.rating } : null;
+    },
+
+    async chatView(maxUserId, opts) {
+      const uid = await userId(maxUserId);
+      const apt = await db.apartment.findUnique({ where: { userId: uid }, select: { houseId: true } });
+      if (!apt) return null;
+      const [rows, members, state] = await Promise.all([
+        db.houseChatMessage.findMany({
+          where: { houseId: apt.houseId, ...(opts.before ? { createdAt: { lt: opts.before } } : {}) },
+          orderBy: { createdAt: 'desc' },
+          take: opts.limit + 1,
+          include: { user: { select: { id: true, name: true, username: true, photoUrl: true } } },
+        }),
+        db.apartment.count({ where: { houseId: apt.houseId } }),
+        db.houseChatState.findUnique({ where: { userId: uid } }),
+      ]);
+      return {
+        houseId: apt.houseId,
+        members,
+        hasMore: rows.length > opts.limit,
+        messages: rows.slice(0, opts.limit).reverse().map((m) => toChatMessage(m, uid)),
+        notify: state?.notify ?? false,
+        lastReadAt: state?.lastReadAt ?? null,
+      };
+    },
+    async postChat(maxUserId, text, at) {
+      const uid = await userId(maxUserId);
+      const apt = await db.apartment.findUnique({ where: { userId: uid }, select: { houseId: true } });
+      if (!apt) return null;
+      const m = await db.houseChatMessage.create({
+        data: { houseId: apt.houseId, userId: uid, text, createdAt: at },
+        include: { user: { select: { id: true, name: true, username: true, photoUrl: true } } },
+      });
+      // Своё сообщение — прочитано.
+      await db.houseChatState.upsert({ where: { userId: uid }, create: { userId: uid, lastReadAt: at }, update: { lastReadAt: at } });
+      return toChatMessage(m, uid);
+    },
+    async deleteChat(maxUserId, id, at) {
+      const res = await db.houseChatMessage.updateMany({ where: { id, userId: await userId(maxUserId), deletedAt: null }, data: { deletedAt: at, text: '' } });
+      return res.count === 1;
+    },
+    async setChatNotify(maxUserId, on) {
+      const uid = await userId(maxUserId);
+      // Включили — считаем от этого момента, чтобы не прислать сводку по старым сообщениям.
+      await db.houseChatState.upsert({
+        where: { userId: uid },
+        create: { userId: uid, notify: on, lastNotifiedAt: new Date() },
+        update: { notify: on, ...(on ? { lastNotifiedAt: new Date() } : {}) },
+      });
+    },
+    async markChatRead(maxUserId, at) {
+      const uid = await userId(maxUserId);
+      await db.houseChatState.upsert({ where: { userId: uid }, create: { userId: uid, lastReadAt: at }, update: { lastReadAt: at } });
+    },
+    async chatUnread(maxUserId) {
+      const uid = await userId(maxUserId);
+      const [apt, state] = await Promise.all([
+        db.apartment.findUnique({ where: { userId: uid }, select: { houseId: true, createdAt: true } }),
+        db.houseChatState.findUnique({ where: { userId: uid }, select: { lastReadAt: true } }),
+      ]);
+      if (!apt) return 0;
+      return db.houseChatMessage.count({
+        where: { houseId: apt.houseId, userId: { not: uid }, deletedAt: null, createdAt: { gt: state?.lastReadAt ?? apt.createdAt } },
+      });
+    },
+    async chatDigests(now, quietMs) {
+      const states = await db.houseChatState.findMany({
+        where: { notify: true, OR: [{ lastNotifiedAt: null }, { lastNotifiedAt: { lte: new Date(now.getTime() - quietMs) } }] },
+        include: { user: { select: { maxUserId: true, maxChatId: true, apartment: { select: { houseId: true, createdAt: true } } } } },
+        take: 200,
+      });
+      const out: ChatDigest[] = [];
+      for (const s of states) {
+        const apt = s.user.apartment;
+        if (!apt || !s.user.maxChatId) continue;
+        const since = [s.lastReadAt, s.lastNotifiedAt, apt.createdAt].filter((d): d is Date => !!d).reduce((a, b) => (a > b ? a : b));
+        const where = { houseId: apt.houseId, userId: { not: s.userId }, deletedAt: null, createdAt: { gt: since } };
+        const [count, last] = await Promise.all([
+          db.houseChatMessage.count({ where }),
+          db.houseChatMessage.findFirst({ where, orderBy: { createdAt: 'desc' }, include: { user: { select: { name: true } } } }),
+        ]);
+        if (count && last) out.push({ maxUserId: s.user.maxUserId, chatId: s.user.maxChatId, count, last: { name: last.user.name, text: last.text } });
+      }
+      return out;
+    },
+    async markChatNotified(maxUserId, at) {
+      const uid = await userId(maxUserId);
+      await db.houseChatState.updateMany({ where: { userId: uid }, data: { lastNotifiedAt: at } });
+    },
+  };
+}
+
+type ChatRow = { id: string; text: string; deletedAt: Date | null; createdAt: Date; user: { id: string; name: string | null; username: string | null; photoUrl: string | null } };
+
+function toChatMessage(m: ChatRow, me: string): ChatMessage {
+  return {
+    id: m.id,
+    text: m.deletedAt ? null : m.text,
+    createdAt: m.createdAt,
+    mine: m.user.id === me,
+    author: { key: m.user.id, name: m.user.name, username: m.user.username, photoUrl: m.user.photoUrl },
   };
 }

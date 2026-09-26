@@ -47,6 +47,23 @@ export function Apartment(props: { apartment: Apt | null; onChangeAddress: () =>
         <div className="field__value" style={{ fontWeight: 600, margin: '2px 0 4px' }}>
           {uk ? orgName(uk) : 'Не указана в справочнике'}
         </div>
+        {uk && (
+          <div className="rating-row" style={{ margin: '0 0 6px' }}>
+            {uk.rating ? (
+              <>
+                <span className="star star--on" aria-hidden="true">
+                  ★
+                </span>
+                <span className="field__value">
+                  <b>{uk.rating.avg.toLocaleString('ru-RU', { minimumFractionDigits: 1, maximumFractionDigits: 1 })}</b> — оценка жильцов,{' '}
+                  {uk.rating.count} {plural(uk.rating.count, 'оценка', 'оценки', 'оценок')}
+                </span>
+              </>
+            ) : (
+              <span className="field__label">Оценок жильцов пока нет — их ставят после выполнения заявки.</span>
+            )}
+          </div>
+        )}
         {uk && !uk.verified && (
           <span className="field__label">Контакты покажем, как только сверим их с ГИС ЖКХ.</span>
         )}
@@ -79,3 +96,6 @@ export function Apartment(props: { apartment: Apt | null; onChangeAddress: () =>
     </div>
   );
 }
+
+const plural = (n: number, one: string, few: string, many: string) =>
+  n % 10 === 1 && n % 100 !== 11 ? one : n % 10 >= 2 && n % 10 <= 4 && (n % 100 < 12 || n % 100 > 14) ? few : many;

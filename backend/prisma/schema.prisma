@@ -24,6 +24,8 @@ model User {
   maxChatId  String?
   name       String?
   username   String?
+  /// Фото профиля MAX (photo_url из данных запуска мини-приложения) — для чата дома.
+  photoUrl   String?
   createdAt  DateTime @default(now())
   updatedAt  DateTime @updatedAt
   lastSeenAt DateTime @default(now())
@@ -31,6 +33,8 @@ model User {
   apartment Apartment?
   session   UserSession?
   requests  Request[]
+  chatMessages HouseChatMessage[]
+  chatState    HouseChatState?
 
   @@map("users")
 }
@@ -121,6 +125,7 @@ model House {
   tariffs         Tariff[]
   capRepairWorks  CapitalRepairWork[]
   requests        Request[]
+  chatMessages    HouseChatMessage[]
 
   @@index([city, street])
   @@index([managerId])
@@ -207,6 +212,10 @@ model Request {
   /// Нормативный срок реакции, считается при создании.
   dueAt            DateTime
   reminderSentAt   DateTime?
+  /// Оценка жильца после закрытия: 1–5, комментарий необязателен. Ставится один раз.
+  rating           Int?
+  ratingComment    String?
+  ratedAt          DateTime?
   createdAt        DateTime  @default(now())
   updatedAt        DateTime  @updatedAt
 
@@ -218,6 +227,7 @@ model Request {
 
   @@index([userId, createdAt])
   @@index([status, dueAt, reminderSentAt])
+  @@index([organizationId, rating])
   @@map("requests")
 }
 
@@ -242,6 +252,40 @@ model RequestCounter {
   value Int @default(0)
 
   @@map("request_counters")
+}
+
+// ─── Чат дома ────────────────────────────────────────────────────────────────
+
+/// Сообщение в чате дома. Участники — жильцы с привязанной квартирой в этом доме.
+model HouseChatMessage {
+  id        String    @id @default(uuid())
+  houseId   String
+  userId    String
+  text      String
+  /// Автор удалил сообщение: текст стирается, остаётся «Сообщение удалено».
+  deletedAt DateTime?
+  createdAt DateTime  @default(now())
+
+  house House @relation(fields: [houseId], references: [id], onDelete: Cascade)
+  user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([houseId, createdAt])
+  @@map("house_chat_messages")
+}
+
+/// Состояние чата у жильца: уведомления (по желанию, по умолчанию выключены) и что уже прочитано.
+model HouseChatState {
+  userId         String    @id
+  notify         Boolean   @default(false)
+  /// Всё, что раньше, — прочитано. Сбрасывается на момент вступления при смене дома.
+  lastReadAt     DateTime?
+  /// Когда бот последний раз присылал сводку — не чаще раза в 10 минут.
+  lastNotifiedAt DateTime?
+  updatedAt      DateTime  @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("house_chat_state")
 }
 
 // ─── Служебные таблицы бота ──────────────────────────────────────────────────
