@@ -60,6 +60,17 @@ export function openMaxUrl(url: string) {
   window.location.href = url;
 }
 
+/** Открыть ссылку во внешнем браузере (скачать файл): внутри MAX — средствами клиента. */
+export function openExternal(url: string) {
+  const abs = new URL(url, window.location.href).toString();
+  const w = webApp();
+  if (insideMax() && w?.openLink) {
+    w.openLink(abs);
+    return;
+  }
+  window.open(abs, '_blank', 'noopener');
+}
+
 export function tap() {
   try {
     webApp()?.HapticFeedback?.impactOccurred('light');

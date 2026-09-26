@@ -501,8 +501,24 @@ export function createBot(deps: { store: BotStore; io: BotIO; logger: Logger; op
   return Object.assign(handle, { remindOverdue, notifyChat });
 }
 
-export function chatDigestText(count: number, last: { name: string | null; text: string }): string {
-  const text = last.text.replace(/\s+/g, ' ').trim();
+/** Как вложение выглядит в сводке: «Фото», «Голосовое сообщение (0:12)», «Файл «акт.pdf»». */
+function attachmentLabel(last: { kind?: string; fileName?: string | null; duration?: number | null }): string {
+  if (last.kind === 'photo') return 'Фото';
+  if (last.kind === 'voice') {
+    const d = last.duration ?? 0;
+    return d ? `Голосовое сообщение (${Math.floor(d / 60)}:${String(d % 60).padStart(2, '0')})` : 'Голосовое сообщение';
+  }
+  if (last.kind === 'file') return `Файл «${last.fileName ?? 'без названия'}»`;
+  return '';
+}
+
+export function chatDigestText(
+  count: number,
+  last: { name: string | null; text: string; kind?: string; fileName?: string | null; duration?: number | null },
+): string {
+  const label = attachmentLabel(last);
+  const caption = last.text.replace(/\s+/g, ' ').trim();
+  const text = label && caption ? `${label}: ${caption}` : label || caption;
   const short = text.length > 200 ? `${text.slice(0, 199)}…` : text;
   return [
     `Чат дома: ${count} ${plural(count, 'новое сообщение', 'новых сообщения', 'новых сообщений')}.`,

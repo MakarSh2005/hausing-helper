@@ -21,14 +21,14 @@ describe('чат дома: сводка ботом', () => {
     await store.setChatNotify('2', true);
 
     clock.now += 11 * 60_000;
-    await store.postChat('1', 'Во дворе перекопали трубу, осторожно', new Date(clock.now));
+    await store.postChat('1', { text: 'Во дворе перекопали трубу, осторожно' }, new Date(clock.now));
     assert.equal(await bot.notifyChat(), 1);
     assert.match(sent[0]!.text, /^Чат дома: 1 новое сообщение\.\nАнна: Во дворе перекопали трубу/);
     const b = sent[0]!.buttons[0]!;
     assert.equal(b.text, 'Открыть чат дома');
     assert.equal('payload' in b ? b.payload : undefined, 'chat');
 
-    await store.postChat('1', 'ещё', new Date(clock.now + 1000));
+    await store.postChat('1', { text: 'ещё' }, new Date(clock.now + 1000));
     assert.equal(await bot.notifyChat(), 0, 'пауза 10 минут');
     clock.now += 10 * 60_000 + 2000;
     assert.equal(await bot.notifyChat(), 1);
@@ -39,6 +39,9 @@ describe('чат дома: сводка ботом', () => {
   it('текст сводки: склонение и обрезка длинного сообщения', () => {
     assert.match(chatDigestText(5, { name: null, text: 'x' }), /^Чат дома: 5 новых сообщений\.\nСосед: x/);
     assert.match(chatDigestText(3, { name: 'Б', text: 'x' }), /3 новых сообщения/);
+    assert.match(chatDigestText(1, { name: 'Б', text: '', kind: 'voice', duration: 75 }), /Б: Голосовое сообщение \(1:15\)$/m);
+    assert.match(chatDigestText(1, { name: 'Б', text: 'в подъезде', kind: 'photo' }), /Б: Фото: в подъезде$/m);
+    assert.match(chatDigestText(1, { name: 'Б', text: '', kind: 'file', fileName: 'акт.pdf' }), /Б: Файл «акт.pdf»$/m);
     const long = chatDigestText(1, { name: 'Б', text: 'а'.repeat(500) });
     assert.ok(long.split('\n')[1]!.length <= 204);
   });

@@ -100,13 +100,27 @@ export interface ChatAuthor {
   photoUrl: string | null;
 }
 
+export type ChatKind = 'text' | 'photo' | 'voice' | 'file';
+
+export interface ChatAttachment {
+  kind: Exclude<ChatKind, 'text'>;
+  /** Имя файла на диске. */
+  file: string;
+  name: string | null;
+  size: number;
+  mime: string;
+  duration: number | null;
+}
+
 export interface ChatMessage {
   id: string;
-  /** null — сообщение удалено автором. */
+  /** null — сообщение удалено автором. У вложения без подписи — пустая строка. */
   text: string | null;
   createdAt: Date;
   author: ChatAuthor;
   mine: boolean;
+  /** null — обычное текстовое или удалённое. */
+  attachment: ChatAttachment | null;
 }
 
 export interface ChatView {
@@ -126,7 +140,7 @@ export interface ChatDigest {
   maxUserId: string;
   chatId: string;
   count: number;
-  last: { name: string | null; text: string };
+  last: { name: string | null; text: string; kind: ChatKind; fileName: string | null; duration: number | null };
 }
 
 export interface NewRequest {
@@ -195,10 +209,12 @@ export interface BotStore {
 
   /** Чат дома жильца; null — квартира не привязана. */
   chatView(maxUserId: string, opts: { limit: number; before?: Date }): Promise<ChatView | null>;
-  /** null — квартира не привязана. */
-  postChat(maxUserId: string, text: string, at: Date): Promise<ChatMessage | null>;
-  /** Удалить своё сообщение (текст стирается). false — не найдено или чужое. */
-  deleteChat(maxUserId: string, id: string, at: Date): Promise<boolean>;
+  /** null — квартира не привязана. id — заранее (файл вложения уже сохранён под этим именем). */
+  postChat(maxUserId: string, msg: { text: string; id?: string; attachment?: ChatAttachment }, at: Date): Promise<ChatMessage | null>;
+  /** Удалить своё сообщение: текст стирается, file — вложение, которое нужно удалить с диска. */
+  deleteChat(maxUserId: string, id: string, at: Date): Promise<{ ok: boolean; file: string | null }>;
+  /** Вложение сообщения — для выдачи по подписанной ссылке. null — нет, удалено или без вложения. */
+  chatAttachment(id: string): Promise<ChatAttachment | null>;
   setChatNotify(maxUserId: string, on: boolean): Promise<void>;
   markChatRead(maxUserId: string, at: Date): Promise<void>;
   /** Непрочитанные сообщения соседей в чате своего дома. */
@@ -506,12 +522,17 @@ export function createPrismaStore(db: Db, opts: { cacheMs?: number } = {}): BotS
         lastReadAt: state?.lastReadAt ?? null,
       };
     },
-    async postChat(maxUserId, text, at) {
+    async postChat(maxUserId, msg, at) {
       const uid = await userId(maxUserId);
       const apt = await db.apartment.findUnique({ where: { userId: uid }, select: { houseId: true } });
       if (!apt) return null;
+      const a = msg.attachment;
       const m = await db.houseChatMessage.create({
-        data: { houseId: apt.houseId, userId: uid, text, createdAt: at },
+        data: {
+          ...(msg.id ? { id: msg.id } : {}),
+          houseId: apt.houseId, userId: uid, text: msg.text, createdAt: at,
+          ...(a ? { kind: a.kind, file: a.file, fileName: a.name, fileSize: a.size, mime: a.mime, duration: a.duration } : {}),
+        },
         include: { user: { select: { id: true, name: true, username: true, photoUrl: true } } },
       });
       // Своё сообщение — прочитано.
@@ -519,8 +540,18 @@ export function createPrismaStore(db: Db, opts: { cacheMs?: number } = {}): BotS
       return toChatMessage(m, uid);
     },
     async deleteChat(maxUserId, id, at) {
-      const res = await db.houseChatMessage.updateMany({ where: { id, userId: await userId(maxUserId), deletedAt: null }, data: { deletedAt: at, text: '' } });
-      return res.count === 1;
+      const uid = await userId(maxUserId);
+      const m = await db.houseChatMessage.findFirst({ where: { id, userId: uid, deletedAt: null }, select: { file: true } });
+      if (!m) return { ok: false, file: null };
+      const res = await db.houseChatMessage.updateMany({
+        where: { id, userId: uid, deletedAt: null },
+        data: { deletedAt: at, text: '', file: null, fileName: null },
+      });
+      return { ok: res.count === 1, file: res.count === 1 ? m.file : null };
+    },
+    async chatAttachment(id) {
+      const m = await db.houseChatMessage.findUnique({ where: { id } });
+      return m && !m.deletedAt ? toAttachment(m) : null;
     },
     async setChatNotify(maxUserId, on) {
       const uid = await userId(maxUserId);
@@ -562,7 +593,12 @@ export function createPrismaStore(db: Db, opts: { cacheMs?: number } = {}): BotS
           db.houseChatMessage.count({ where }),
           db.houseChatMessage.findFirst({ where, orderBy: { createdAt: 'desc' }, include: { user: { select: { name: true } } } }),
         ]);
-        if (count && last) out.push({ maxUserId: s.user.maxUserId, chatId: s.user.maxChatId, count, last: { name: last.user.name, text: last.text } });
+        if (count && last) {
+          out.push({
+            maxUserId: s.user.maxUserId, chatId: s.user.maxChatId, count,
+            last: { name: last.user.name, text: last.text, kind: last.kind as ChatKind, fileName: last.fileName, duration: last.duration },
+          });
+        }
       }
       return out;
     },
@@ -573,7 +609,16 @@ export function createPrismaStore(db: Db, opts: { cacheMs?: number } = {}): BotS
   };
 }
 
-type ChatRow = { id: string; text: string; deletedAt: Date | null; createdAt: Date; user: { id: string; name: string | null; username: string | null; photoUrl: string | null } };
+type AttachmentRow = { kind: string; file: string | null; fileName: string | null; fileSize: number | null; mime: string | null; duration: number | null };
+type ChatRow = AttachmentRow & {
+  id: string; text: string; deletedAt: Date | null; createdAt: Date;
+  user: { id: string; name: string | null; username: string | null; photoUrl: string | null };
+};
+
+function toAttachment(m: AttachmentRow): ChatAttachment | null {
+  if (m.kind === 'text' || !m.file || !m.mime) return null;
+  return { kind: m.kind as ChatAttachment['kind'], file: m.file, name: m.fileName, size: m.fileSize ?? 0, mime: m.mime, duration: m.duration };
+}
 
 function toChatMessage(m: ChatRow, me: string): ChatMessage {
   return {
@@ -582,5 +627,6 @@ function toChatMessage(m: ChatRow, me: string): ChatMessage {
     createdAt: m.createdAt,
     mine: m.user.id === me,
     author: { key: m.user.id, name: m.user.name, username: m.user.username, photoUrl: m.user.photoUrl },
+    attachment: m.deletedAt ? null : toAttachment(m),
   };
 }

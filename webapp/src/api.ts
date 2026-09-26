@@ -96,11 +96,12 @@ const saved = {
 const TIMEOUT_MS = 10_000;
 
 /** fetch с таймаутом: на плохом мобильном интернете запрос не должен висеть бесконечно. */
-async function timedFetch(path: string, init: RequestInit = {}): Promise<Response> {
+async function timedFetch(path: string, init: RequestInit & { timeoutMs?: number } = {}): Promise<Response> {
+  const { timeoutMs, ...rest } = init;
   const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), TIMEOUT_MS);
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs ?? TIMEOUT_MS);
   try {
-    return await fetch(path, { ...init, signal: ctrl.signal });
+    return await fetch(path, { ...rest, signal: ctrl.signal });
   } catch {
     throw new NetworkError('network');
   } finally {
@@ -182,7 +183,7 @@ async function get<T>(path: string, attempt = 0): Promise<T> {
  * Запрос с авторизацией для действий (POST): истекла сессия внутри MAX — входим заново и повторяем.
  * Не повторяем при сетевой ошибке: иначе можно создать заявку дважды (сервер это отсекает, но зачем).
  */
-async function authed(path: string, init: RequestInit = {}, retried = false): Promise<Response> {
+async function authed(path: string, init: RequestInit & { timeoutMs?: number } = {}, retried = false): Promise<Response> {
   const res = await timedFetch(path, { ...init, headers: { ...(init.headers ?? {}), ...(token ? { authorization: `Bearer ${token}` } : {}) } });
   if (res.status === 401) {
     token = null;
@@ -299,6 +300,15 @@ export interface ChatAuthor {
   username: string | null;
   photo_url: string | null;
 }
+export type ChatKind = 'photo' | 'voice' | 'file';
+export interface ChatAttachment {
+  kind: ChatKind;
+  name: string | null;
+  size: number;
+  duration: number | null;
+  /** Подписанная ссылка на файл (работает без авторизации около часа). */
+  url: string;
+}
 export interface ChatMsg {
   id: string;
   text: string | null;
@@ -306,6 +316,7 @@ export interface ChatMsg {
   at: string;
   mine: boolean;
   author: ChatAuthor;
+  attachment: ChatAttachment | null;
 }
 export type ChatData =
   | { available: false }
@@ -319,8 +330,30 @@ export type ChatData =
       last_read_at: string | null;
       max_text: number;
       messages: ChatMsg[];
+      uploads: boolean;
+      limits: { photo: number; voice: number; file: number; voice_sec: number };
     };
 export type ChatSendError = 'empty' | 'too_long' | 'too_fast' | 'no_apartment';
+export type ChatUploadError = 'too_long' | 'too_fast' | 'no_apartment' | 'too_big' | 'bad_media' | 'bad_file_type' | 'bad_kind';
+
+/** Вложение в чат: тело — байты, параметры — в строке запроса. */
+async function chatUpload(
+  kind: ChatKind,
+  blob: Blob,
+  opts: { name?: string; duration?: number; caption?: string } = {},
+): Promise<{ ok: true; message: ChatMsg } | { ok: false; error: ChatUploadError }> {
+  const q = new URLSearchParams({ kind });
+  if (opts.name) q.set('name', opts.name);
+  if (opts.duration) q.set('duration', String(Math.round(opts.duration)));
+  if (opts.caption?.trim()) q.set('caption', opts.caption.trim());
+  // Файл до 20 МБ по мобильному интернету — дольше обычных 10 секунд
+  const res = await authed(`/api/chat/upload?${q}`, { method: 'POST', headers: { 'content-type': 'application/octet-stream' }, body: blob, timeoutMs: 120_000 });
+  const b = (await res.json().catch(() => null)) as (ChatMsg & { error?: ChatUploadError }) | null;
+  if (res.status === 201 && b) return { ok: true, message: b };
+  if (res.status === 413) return { ok: false, error: 'too_big' };
+  if (b?.error && res.status < 500) return { ok: false, error: b.error };
+  throw new NetworkError(`http ${res.status}`);
+}
 
 async function chatSend(text: string): Promise<{ ok: true; message: ChatMsg } | { ok: false; error: ChatSendError }> {
   const res = await postJson('/api/chat', { text });
@@ -347,6 +380,7 @@ export const api = {
   chat: (before?: string) => get<ChatData>(`/api/chat${before ? `?before=${encodeURIComponent(before)}` : ''}`),
   chatUnread: () => get<{ count: number }>('/api/chat/unread'),
   chatSend,
+  chatUpload,
   chatDelete,
   chatNotify,
   photo: photoBlob,

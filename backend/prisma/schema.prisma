@@ -261,8 +261,20 @@ model HouseChatMessage {
   id        String    @id @default(uuid())
   houseId   String
   userId    String
+  /// Текст или подпись к вложению (может быть пустой у фото, голосового и файла).
   text      String
-  /// Автор удалил сообщение: текст стирается, остаётся «Сообщение удалено».
+  /// "text" | "photo" | "voice" | "file"
+  kind      String    @default("text")
+  /// Вложение на диске: <DATA_DIR>/chat/<id>.<ext>
+  file      String?
+  /// Имя файла, как его назвал автор (для документов).
+  fileName  String?
+  fileSize  Int?
+  /// Тип по сигнатуре файла: image/jpeg, audio/webm, application/octet-stream…
+  mime      String?
+  /// Длительность голосового, секунд.
+  duration  Int?
+  /// Автор удалил сообщение: текст и файл стираются, остаётся «Сообщение удалено».
   deletedAt DateTime?
   createdAt DateTime  @default(now())
 

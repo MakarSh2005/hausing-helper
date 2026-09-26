@@ -12,6 +12,7 @@ import { issueSessionToken, linkSecret } from '../src/auth/sessionToken.js';
 import { signWebAppData } from '../src/auth/webAppData.js';
 import type { Db } from '../src/db.js';
 import { clock, HOUSES, memoryStore } from './memoryStore.js';
+import { createChatFileStore } from '../src/chat/files.js';
 
 const TOKEN = 'test-bot-token-1234567890';
 const SECRET = 's'.repeat(40);
@@ -57,6 +58,7 @@ describe('API мини-приложения', () => {
     const api = createApiRouter({
       store, logger, botToken: TOKEN, sessionSecret: SECRET, sessionTtlSec: 3600,
       demoStatuses: true, now: () => new Date(clock.now), perUserPerMin: 40,
+      chatFiles: createChatFileStore(path.join(webappDir, 'data')),
     });
     server = createApp({ db, logger, webhook, api, webappDir }).listen(0);
     await new Promise((r) => server.once('listening', r));
@@ -370,32 +372,96 @@ describe('API мини-приложения', () => {
     await store.saveApartment(B, { houseId: HOUSES[0]!.id, number: '2', entrance: null });
     const tB = tokenFor(B);
     clock.now += 1000;
-    await store.postChat(A, 'до включения уведомлений', new Date(clock.now));
+    await store.postChat(A, { text: 'до включения уведомлений' }, new Date(clock.now));
     assert.equal((await store.chatDigests(new Date(clock.now), 600_000)).filter((d) => d.maxUserId === B).length, 0, 'по умолчанию выключены');
 
     const on = await call('/api/chat/notify', { method: 'PUT', token: tB, body: JSON.stringify({ on: true }) });
     assert.deepEqual(await on.json(), { notify: true });
     assert.equal(((await (await call('/api/chat', { token: tB })).json()) as { notify: boolean }).notify, true);
     clock.now += 11 * 60_000;
-    await store.postChat(A, 'Лифт снова стоит', new Date(clock.now));
-    await store.postChat(A, 'Позвонила в УК', new Date(clock.now + 1));
+    await store.postChat(A, { text: 'Лифт снова стоит' }, new Date(clock.now));
+    await store.postChat(A, { text: 'Позвонила в УК' }, new Date(clock.now + 1));
     const digests = (await store.chatDigests(new Date(clock.now + 2), 600_000)).filter((d) => d.maxUserId === B);
     assert.equal(digests.length, 1);
-    assert.deepEqual([digests[0]!.count, digests[0]!.last], [2, { name: 'Анна', text: 'Позвонила в УК' }], 'старое сообщение (до включения) не в сводке');
+    assert.deepEqual([digests[0]!.count, digests[0]!.last], [2, { name: 'Анна', text: 'Позвонила в УК', kind: 'text', fileName: null, duration: null }], 'старое сообщение (до включения) не в сводке');
     await store.markChatNotified(B, new Date(clock.now + 2));
-    await store.postChat(A, 'ещё одно', new Date(clock.now + 3));
+    await store.postChat(A, { text: 'ещё одно' }, new Date(clock.now + 3));
     assert.equal((await store.chatDigests(new Date(clock.now + 60_000), 600_000)).filter((d) => d.maxUserId === B).length, 0, 'тишина 10 минут');
 
     await call('/api/chat/notify', { method: 'PUT', token: tB, body: JSON.stringify({ on: false }) });
     assert.equal((await store.chatDigests(new Date(clock.now + 3_600_000), 600_000)).filter((d) => d.maxUserId === B).length, 0, 'выключил — тишина');
 
     // Переезд: в новом доме старые сообщения не считаются непрочитанными
-    await store.postChat(A, 'в старом доме', new Date(clock.now + 4));
+    await store.postChat(A, { text: 'в старом доме' }, new Date(clock.now + 4));
     clock.now += 60_000;
     await store.saveApartment(A, { houseId: HOUSES[1]!.id, number: '9', entrance: null });
     await store.saveApartment(B, { houseId: HOUSES[1]!.id, number: '9', entrance: null });
     assert.equal(await store.chatUnread(B), 0);
     clock.now -= 12 * 60_000 + 2000;
+  });
+
+  it('чат дома: фото, голосовое и файл — тип по содержимому, выдача по подписанной ссылке, удаление вместе с файлом', async () => {
+    const [A, B, C] = ['72001', '72002', '72003'];
+    await store.saveApartment(A, { houseId: HOUSES[0]!.id, number: '1', entrance: null });
+    await store.saveApartment(B, { houseId: HOUSES[0]!.id, number: '2', entrance: null });
+    await store.saveApartment(C, { houseId: HOUSES[1]!.id, number: '3', entrance: null });
+    const up = (u: string, q: string, body: Buffer) =>
+      fetch(`${base}/api/chat/upload?${q}`, { method: 'POST', headers: { authorization: `Bearer ${tokenFor(u)}`, 'content-type': 'application/octet-stream' }, body });
+    const jpg = Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xe0]), Buffer.alloc(100, 1)]);
+    const webm = Buffer.concat([Buffer.from([0x1a, 0x45, 0xdf, 0xa3]), Buffer.alloc(100, 2)]);
+    const pdf = Buffer.concat([Buffer.from('%PDF-1.7\n'), Buffer.alloc(100, 3)]);
+
+    type Att = { kind: string; name: string | null; size: number; duration: number | null; url: string };
+    const photo = await up(A, `kind=photo&caption=${encodeURIComponent('Вот что в подъезде')}`, jpg);
+    assert.equal(photo.status, 201);
+    const pm = (await photo.json()) as { id: string; text: string; attachment: Att };
+    assert.equal(pm.text, 'Вот что в подъезде');
+    assert.deepEqual([pm.attachment.kind, pm.attachment.size, pm.attachment.name], ['photo', jpg.length, null]);
+
+    const voice = (await (await up(A, 'kind=voice&duration=12.4', webm)).json()) as { attachment: Att };
+    assert.deepEqual([voice.attachment.kind, voice.attachment.duration], ['voice', 12]);
+    const file = (await (await up(A, `kind=file&name=${encodeURIComponent('../Акт осмотра.pdf')}`, pdf)).json()) as { id: string; attachment: Att };
+    assert.equal(file.attachment.name, 'Акт осмотра.pdf', 'без пути');
+
+    // Тип — по содержимому, а не по расширению или заголовку
+    assert.deepEqual(await (await up(A, 'kind=photo', pdf)).json(), { error: 'bad_media' });
+    assert.deepEqual(await (await up(A, 'kind=voice', jpg)).json(), { error: 'bad_media' });
+    assert.deepEqual(await (await up(A, 'kind=file&name=virus.exe', Buffer.from('MZ\x90\x00'))).json(), { error: 'bad_file_type' });
+    assert.deepEqual(await (await up(A, 'kind=file&name=fake.pdf', jpg)).json(), { error: 'bad_file_type' });
+    assert.deepEqual(await (await up(A, 'kind=file&name=page.txt', Buffer.from('<html><script>alert(1)</script>'))).json(), { error: 'bad_file_type' });
+    assert.equal((await up(A, 'kind=voice', Buffer.alloc(6 * 1024 * 1024, 1))).status, 413);
+    assert.equal((await up('72009', 'kind=photo', jpg)).status, 409, 'без квартиры');
+    assert.equal((await fetch(`${base}/api/chat/upload?kind=photo`, { method: 'POST', body: jpg })).status, 401);
+
+    // Сосед по дому видит вложения со ссылками; ссылка работает без заголовка авторизации
+    const chat = (await (await call('/api/chat', { token: tokenFor(B) })).json()) as { messages: Array<{ id: string; attachment: Att | null }> };
+    const got = chat.messages.filter((m) => m.attachment);
+    assert.equal(got.length, 3);
+    const img = await fetch(base + got[0]!.attachment!.url);
+    assert.equal(img.status, 200);
+    assert.equal(img.headers.get('content-type'), 'image/jpeg');
+    assert.equal(img.headers.get('x-content-type-options'), 'nosniff');
+    assert.deepEqual(Buffer.from(await img.arrayBuffer()), jpg);
+    const doc = await fetch(base + got[2]!.attachment!.url);
+    assert.equal(doc.headers.get('content-type'), 'application/octet-stream', 'документ — только скачиванием');
+    assert.match(doc.headers.get('content-disposition') ?? '', /^attachment; .*filename\*=UTF-8''%D0%90%D0%BA%D1%82/);
+    const audio = await fetch(base + got[1]!.attachment!.url, { headers: { range: 'bytes=0-3' } });
+    assert.equal(audio.status, 206, 'голосовое отдаётся частями (нужно Safari)');
+
+    // Без подписи, с чужой подписью или просроченной — 404
+    const u = new URL(base + got[0]!.attachment!.url);
+    assert.equal((await fetch(`${base}${u.pathname}`)).status, 404);
+    assert.equal((await fetch(`${base}/api/chat/files/${file.id}?t=${u.searchParams.get('t')}`)).status, 404, 'подпись от другого сообщения');
+    clock.now += 3 * 3_600_000;
+    assert.equal((await fetch(base + got[0]!.attachment!.url)).status, 404, 'ссылка устарела');
+    clock.now -= 3 * 3_600_000;
+
+    // Удаление — вместе с файлом
+    assert.equal((await call(`/api/chat/${pm.id}`, { method: 'DELETE', token: tokenFor(A) })).status, 200);
+    assert.equal((await fetch(base + got[0]!.attachment!.url)).status, 404);
+    assert.equal(fs.existsSync(path.join(webappDir, 'data', 'chat', `${pm.id}.jpg`)), false, 'файл удалён с диска');
+    const after = (await (await call('/api/chat', { token: tokenFor(B) })).json()) as { messages: Array<{ id: string; deleted: boolean; attachment: unknown }> };
+    assert.deepEqual(after.messages.find((m) => m.id === pm.id), { ...after.messages.find((m) => m.id === pm.id), deleted: true, attachment: null });
   });
 
   it('лимит запросов на пользователя → 429', async () => {

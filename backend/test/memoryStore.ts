@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import type { ApartmentInfo, BotStore, ChatDigest, ChatMessage, HouseInfo, RequestInfo, Session, UserProfile } from '../src/bot/store.js';
+import type { ApartmentInfo, BotStore, ChatAttachment, ChatDigest, ChatMessage, HouseInfo, RequestInfo, Session, UserProfile } from '../src/bot/store.js';
 import { isValidOrgInn } from '../src/domain/inn.js';
 
 /** Общие для тестов справочник домов (из настоящего файла данных) и in-memory хранилище. */
@@ -49,7 +49,7 @@ export function memoryStore(houses = HOUSES) {
   };
   const users = new Set<string>();
   const profiles = new Map<string, UserProfile>();
-  type ChatRow = { id: string; houseId: string; user: string; text: string; deleted: boolean; createdAt: Date };
+  type ChatRow = { id: string; houseId: string; user: string; text: string; deleted: boolean; createdAt: Date; attachment: ChatAttachment | null };
   const chat: ChatRow[] = [];
   const chatState = new Map<string, { notify: boolean; lastReadAt: Date | null; lastNotifiedAt: Date | null }>();
   const state = (u: string) => {
@@ -61,6 +61,7 @@ export function memoryStore(houses = HOUSES) {
   const chatView = (m: ChatRow, me: string): ChatMessage => ({
     id: m.id, text: m.deleted ? null : m.text, createdAt: m.createdAt, mine: m.user === me,
     author: { key: keyOf(m.user), name: profiles.get(m.user)?.name ?? null, username: profiles.get(m.user)?.username || null, photoUrl: profiles.get(m.user)?.photoUrl || null },
+    attachment: m.deleted ? null : m.attachment,
   });
   const unreadOf = (u: string, since: Date | null) => {
     const a = apartments.get(u);
@@ -166,21 +167,24 @@ export function memoryStore(houses = HOUSES) {
         lastReadAt: state(u).lastReadAt,
       };
     },
-    postChat: async (u, text, at) => {
+    postChat: async (u, msg, at) => {
       const a = apartments.get(u);
       if (!a) return null;
-      const m = { id: `m${++chatSeq}`, houseId: a.houseId, user: u, text, deleted: false, createdAt: at };
+      const m = { id: msg.id ?? `m${++chatSeq}`, houseId: a.houseId, user: u, text: msg.text, deleted: false, createdAt: at, attachment: msg.attachment ?? null };
       chat.push(m);
       state(u).lastReadAt = at;
       return chatView(m, u);
     },
     deleteChat: async (u, id) => {
       const m = chat.find((x) => x.id === id && x.user === u && !x.deleted);
-      if (!m) return false;
+      if (!m) return { ok: false, file: null };
       m.deleted = true;
       m.text = '';
-      return true;
+      const file = m.attachment?.file ?? null;
+      m.attachment = null;
+      return { ok: true, file };
     },
+    chatAttachment: async (id) => chat.find((x) => x.id === id && !x.deleted)?.attachment ?? null,
     setChatNotify: async (u, on) => {
       state(u).notify = on;
       if (on) state(u).lastNotifiedAt = new Date(clock.now);
@@ -194,7 +198,12 @@ export function memoryStore(houses = HOUSES) {
         const since = [s.lastReadAt, s.lastNotifiedAt].filter((d): d is Date => !!d).reduce<Date | null>((a, b) => (!a || b > a ? b : a), null);
         const fresh = unreadOf(u, since);
         const last = fresh.at(-1);
-        if (last) out.push({ maxUserId: u, chatId: 'c1', count: fresh.length, last: { name: profiles.get(last.user)?.name ?? null, text: last.text } });
+        if (last) {
+          out.push({
+            maxUserId: u, chatId: 'c1', count: fresh.length,
+            last: { name: profiles.get(last.user)?.name ?? null, text: last.text, kind: last.attachment?.kind ?? 'text', fileName: last.attachment?.name ?? null, duration: last.attachment?.duration ?? null },
+          });
+        }
       }
       return out;
     },
