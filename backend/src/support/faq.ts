@@ -19,7 +19,8 @@ export type SupportAction =
   | { type: 'address'; label: string }
   | { type: 'call'; label: string; phone: string }
   | { type: 'link'; label: string; url: string }
-  | { type: 'tab'; label: string; tab: 'apartment' | 'requests' | 'notifications' };
+  | { type: 'tab'; label: string; tab: 'apartment' | 'requests' | 'notifications' }
+  | { type: 'create_chat'; label: string };
 
 export interface SupportAnswer {
   topic: string;
@@ -327,17 +328,36 @@ const TOPICS: Topic[] = [
   {
     id: 'chat',
     patterns: [/чат/, /сосед/, /групп/, /вступить/],
-    answer: (ctx) => ({
-      topic: 'chat',
-      text: ctx.houseChat?.link
-        ? `У вашего дома есть чат соседей в MAX${ctx.houseChat.title ? ` — «${ctx.houseChat.title}»` : ''}. Там обсуждают отключения, собрания и новости дома. Ссылка всегда есть на вкладке «Квартира».`
-        : [
-            'Чата вашего дома в MAX пока нет.',
-            'Создать его может любой житель: создайте групповой чат в MAX, добавьте в него бота «Жилищный помощник» администратором и отправьте в чат команду «/дом <адрес>», например «/дом Баумана 15». После этого приложение будет предлагать чат всем жильцам дома.',
-          ].join('\n'),
-      actions: ctx.houseChat?.link ? [{ type: 'link', label: 'Вступить в чат дома', url: ctx.houseChat.link }] : [],
-      suggestions: [S.address, S.privacy],
-    }),
+    answer: (ctx) => {
+      const hc = ctx.houseChat;
+      if (hc?.link) {
+        return {
+          topic: 'chat',
+          text: `У вашего дома есть чат соседей в MAX${hc.title ? ` — «${hc.title}»` : ''}. Там обсуждают отключения, собрания и новости дома. Ссылка всегда есть на вкладке «Квартира».`,
+          actions: [{ type: 'link', label: 'Вступить в чат дома', url: hc.link }],
+          suggestions: [S.address, S.privacy],
+        };
+      }
+      if (hc) {
+        return {
+          topic: 'chat',
+          text: 'Чат вашего дома в MAX уже создан. Как только его владелец добавит ссылку-приглашение, приложение предложит вам вступить.',
+          actions: [],
+          suggestions: [S.submit, S.privacy],
+        };
+      }
+      return {
+        topic: 'chat',
+        text: ctx.apartment
+          ? [
+              'Чата вашего дома в MAX пока нет — бот создаст его.',
+              'Нажмите «Создать чат дома»: бот пришлёт кнопку в чат с ним, по нажатию MAX создаст чат дома. Вы станете его владельцем, а остальным жильцам приложение само предложит вступить.',
+            ].join('\n')
+          : 'Чат дома привязан к адресу. Укажите адрес — и бот предложит чат вашего дома или создаст его.',
+        actions: ctx.apartment ? [{ type: 'create_chat', label: 'Создать чат дома' }] : noAddress(ctx),
+        suggestions: [S.address, S.privacy],
+      };
+    },
   },
   {
     id: 'privacy',

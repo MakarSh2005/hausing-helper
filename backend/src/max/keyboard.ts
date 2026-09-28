@@ -43,6 +43,19 @@ export const btn = {
       ...(app.fallbackUrl ? { fallbackUrl: app.fallbackUrl } : {}),
     };
   },
+  /**
+   * Кнопка создания группового чата: по нажатию MAX создаёт чат с этим названием, нажавший — владелец,
+   * бот — администратор; боту приходит message_chat_created со start_payload.
+   */
+  chat(text: string, c: { title: string; description?: string; startPayload?: string }): Button {
+    return {
+      type: 'chat',
+      text,
+      chat_title: c.title.slice(0, 128),
+      ...(c.description ? { chat_description: c.description.slice(0, 256) } : {}),
+      ...(c.startPayload ? { start_payload: c.startPayload.slice(0, 512) } : {}),
+    };
+  },
   contact(text: string): Button {
     return { type: 'request_contact', text };
   },

@@ -42,7 +42,7 @@ describe('long polling', () => {
     await p.stop();
     assert.equal(got.length, 2);
     assert.deepEqual(calls.slice(0, 4).map((c) => c.marker), [null, 101, 101, 102]);
-    assert.deepEqual(calls[0]!.types, ['message_created', 'bot_started', 'message_callback', 'bot_added', 'bot_removed']);
+    assert.deepEqual(calls[0]!.types, ['message_created', 'bot_started', 'message_callback', 'bot_added', 'bot_removed', 'message_chat_created']);
   });
 
   it('ошибка сети → пауза и повтор; ошибка обработки одного события не останавливает опрос', async () => {

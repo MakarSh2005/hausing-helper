@@ -328,6 +328,9 @@ describe('API мини-приложения', () => {
     assert.equal(await me(A), null);
     await store.bindHouseChat({ houseId: HOUSES[4]!.id, chatId: '-1', title: 'Соседи', link: null, boundBy: '1' });
     assert.equal(await me(A), null, 'без ссылки приглашать некуда');
+    const state = async (u: string) => ((await (await call('/api/me', { token: tokenFor(u) })).json()) as { apartment: { house_chat_state: string } }).apartment.house_chat_state;
+    assert.equal(await state(A), 'no_link');
+    assert.equal(await state(B), 'none');
     await store.bindHouseChat({ houseId: HOUSES[4]!.id, chatId: '-1', title: 'Соседи', link: 'https://max.ru/join/q', boundBy: '1' });
     assert.deepEqual(await me(A), { title: 'Соседи', link: 'https://max.ru/join/q', since: (await me(A))!.since });
     assert.deepEqual((await invites(A)).map((n) => n.link), ['https://max.ru/join/q']);

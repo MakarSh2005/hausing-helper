@@ -135,6 +135,7 @@ export function memoryStore(houses = HOUSES) {
       const a = apartments.get(u);
       return (a && houseChats.find((c) => c.houseId === a.houseId)) || null;
     },
+    houseChatByHouse: async (houseId) => houseChats.find((c) => c.houseId === houseId) ?? null,
     houseChatByChat: async (chatId) => houseChats.find((c) => c.chatId === chatId) ?? null,
     bindHouseChat: async (c) => {
       for (let i = houseChats.length - 1; i >= 0; i--) if (houseChats[i]!.chatId === c.chatId || houseChats[i]!.houseId === c.houseId) houseChats.splice(i, 1);

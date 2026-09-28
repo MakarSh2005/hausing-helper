@@ -56,6 +56,22 @@ const BotMembershipSchema = z.object({
   is_channel: z.boolean().optional(),
 });
 
+const ChatCreatedSchema = z.object({
+  update_type: z.literal('message_chat_created'),
+  timestamp: z.number(),
+  chat: z
+    .object({
+      chat_id: Id,
+      owner_id: Id.nullish(),
+      title: z.string().nullish(),
+      link: z.string().nullish(),
+    })
+    .loose(),
+  title: z.string().nullish(),
+  message_id: z.string().nullish(),
+  start_payload: z.string().max(512).nullish(),
+});
+
 const MessageCallbackSchema = z.object({
   update_type: z.literal('message_callback'),
   timestamp: z.number(),
@@ -73,8 +89,11 @@ const MessageCallbackSchema = z.object({
     .nullish(),
 });
 
-/** added / removed — бота добавили в групповой чат или убрали из него (чат дома в MAX). */
-export type EventType = 'message' | 'started' | 'callback' | 'added' | 'removed';
+/**
+ * added / removed — бота добавили в групповой чат или убрали из него;
+ * chat_created — жилец нажал кнопку «Создать чат дома» (кнопка типа chat), MAX создал группу с ботом-администратором.
+ */
+export type EventType = 'message' | 'started' | 'callback' | 'added' | 'removed' | 'chat_created';
 
 export interface ParsedUser {
   userId: string;
@@ -103,6 +122,9 @@ export interface ParsedEvent {
   /** mid сообщения: для message — входящее, для callback — сообщение с кнопкой. */
   messageId?: string;
   attachments?: ParsedAttachment[];
+  /** chat_created: название и ссылка созданного чата (если MAX их передал). */
+  chatTitle?: string;
+  chatLink?: string;
   /** Unix ms. */
   timestamp: number;
 }
@@ -194,6 +216,28 @@ export function parseUpdate(raw: unknown): ParseResult {
           payload: u.callback.payload ?? undefined,
           callbackId: u.callback.callback_id,
           messageId: u.message?.body?.mid,
+          timestamp: u.timestamp,
+        },
+      };
+    }
+
+    case 'message_chat_created': {
+      const r = ChatCreatedSchema.safeParse(raw);
+      if (!r.success) return { ok: false, reason: 'invalid', updateType, issues: issuesOf(r.error) };
+      const u = r.data;
+      const owner = u.chat.owner_id ?? '0';
+      return {
+        ok: true,
+        event: {
+          type: 'chat_created',
+          dedupKey: `chat_created:${u.chat.chat_id}`,
+          user: { userId: owner },
+          userId: owner,
+          chatId: u.chat.chat_id,
+          chatType: 'chat',
+          payload: u.start_payload ?? undefined,
+          chatTitle: (u.chat.title ?? u.title) || undefined,
+          chatLink: u.chat.link || undefined,
           timestamp: u.timestamp,
         },
       };

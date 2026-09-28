@@ -109,6 +109,11 @@ export class MaxClient {
     return this.request('GET', `/chats/${encodeURIComponent(chatId)}/members/admins`);
   }
 
+  /** DELETE /chats/{chatId}/members/me — бот выходит из чата. */
+  leaveChat(chatId: string): Promise<unknown> {
+    return this.request('DELETE', `/chats/${encodeURIComponent(chatId)}/members/me`);
+  }
+
   /** POST /answers?callback_id=… — ответ на нажатие inline-кнопки. */
   async answerCallback(callbackId: string, answer: CallbackAnswer): Promise<unknown> {
     const res = await this.request('POST', '/answers', { query: { callback_id: callbackId }, body: answer });

@@ -6,7 +6,7 @@ import { createBot, type Bot, type BotIO, type BotOptions } from './bot.js';
 import { createPrismaStore } from './store.js';
 
 /** Отправка сообщений и ответов на нажатия через MAX API. */
-export function createMaxIO(deps: { max: Pick<MaxClient, 'sendMessage' | 'answerCallback'> & Partial<Pick<MaxClient, 'getChat' | 'getChatAdmins'>>; logger: Logger }): BotIO {
+export function createMaxIO(deps: { max: Pick<MaxClient, 'sendMessage' | 'answerCallback'> & Partial<Pick<MaxClient, 'getChat' | 'getChatAdmins' | 'leaveChat'>>; logger: Logger }): BotIO {
   const log = deps.logger.child({ module: 'router' });
 
   // Если MAX однажды отклонил кнопку мини-приложения — дальше сразу шлём ссылку, без лишней ошибки.
@@ -46,6 +46,9 @@ export function createMaxIO(deps: { max: Pick<MaxClient, 'sendMessage' | 'answer
       if (!deps.max.getChatAdmins) return [];
       const r = await deps.max.getChatAdmins(chatId);
       return (r.members ?? []).map((m) => String(m.user_id));
+    },
+    async leaveChat(chatId: string) {
+      await deps.max.leaveChat?.(chatId);
     },
     async answer(callbackId: string, notification: string) {
       try {

@@ -68,7 +68,10 @@ describe('чат поддержки: типовые вопросы', () => {
 
     const chat = answerQuestion('чат соседей', ctx({ houseChat: { houseId: house.id, chatId: '-1', title: 'Баумана 15', link: 'https://max.ru/join/x', createdAt: now } }));
     assert.deepEqual(chat.actions, [{ type: 'link', label: 'Вступить в чат дома', url: 'https://max.ru/join/x' }]);
-    assert.match(answerQuestion('чат соседей', ctx()).text, /\/дом <адрес>/);
+    const none = answerQuestion('чат соседей', ctx());
+    assert.match(none.text, /бот создаст его/);
+    assert.deepEqual(none.actions, [{ type: 'create_chat', label: 'Создать чат дома' }]);
+    assert.match(answerQuestion('чат соседей', ctx({ houseChat: { houseId: house.id, chatId: '-1', title: null, link: null, createdAt: now } })).text, /ссылку-приглашение/);
 
     const noApt = greeting(ctx({ apartment: null }));
     assert.deepEqual(noApt.actions, [{ type: 'address', label: 'Указать адрес' }]);

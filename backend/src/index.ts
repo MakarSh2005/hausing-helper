@@ -116,6 +116,7 @@ async function main() {
     sessionTtlSec: config.SESSION_TTL_SECONDS,
     demoStatuses: config.MOCK_AUTO_STATUS_CHANGE,
     photoStorage,
+    offerHouseChat: (userId) => bot.offerHouseChat(userId),
   });
   if (!config.SESSION_JWT_SECRET) logger.info('мини-приложение: ключ сессий производный от токена бота (SESSION_JWT_SECRET не задан)');
   const app = createApp({ db, logger, webhook, botInfo, api, webappDir: config.WEBAPP_DIR });

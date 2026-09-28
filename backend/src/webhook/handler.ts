@@ -73,7 +73,7 @@ export function createWebhookHandler(deps: WebhookDeps) {
 
     // Групповой чат (чат дома) — не диалог с ботом: chat_id группы нельзя запоминать как диалог
     // жильца (туда ушли бы напоминания), и пользователей из чужих сообщений не заводим.
-    const isGroup = ev.type === 'added' || ev.type === 'removed' || (ev.chatType !== undefined && ev.chatType !== 'dialog');
+    const isGroup = ev.type === 'added' || ev.type === 'removed' || ev.type === 'chat_created' || (ev.chatType !== undefined && ev.chatType !== 'dialog');
     if (!isGroup) await deps.db.user.upsert({
       where: { maxUserId: ev.userId },
       create: { maxUserId: ev.userId, maxChatId: ev.chatId, name: ev.user.name, username: ev.user.username },

@@ -15,7 +15,10 @@ function recorder() {
       void out.push({ text, buttons: (kb ?? []).flat().map((b) => ({ text: b.text, payload: 'payload' in b ? b.payload : undefined })) }),
     answer: async () => {},
   };
-  return { io, out, last: () => out[out.length - 1]! };
+  // После привязки квартиры бот отдельным сообщением предлагает чат дома — сценарии онбординга
+  // проверяют ответ по существу, поэтому last() пропускает это предложение (его проверяет отдельный тест).
+  const isOffer = (o: Out) => /чата? жильцов/.test(o.text);
+  return { io, out, last: () => [...out].reverse().find((o) => !isOffer(o))! };
 }
 
 const U = '443346426';

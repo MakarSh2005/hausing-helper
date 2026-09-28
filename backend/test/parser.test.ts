@@ -78,6 +78,19 @@ describe('parseUpdate', () => {
     assert.deepEqual(r.event.attachments, [{ type: 'image', payload: { token: 't' } }]);
   });
 
+  it('message_chat_created — чат создан кнопкой: id чата, владелец, код дома, название и ссылка', () => {
+    const r = parseUpdate({
+      update_type: 'message_chat_created', timestamp: 9,
+      chat: { chat_id: -200, type: 'chat', status: 'active', title: 'Дом: ул. Баумана, д. 15', owner_id: 501, link: null, is_public: false, participants_count: 2, last_event_time: 9 },
+      message_id: 'mid.1', start_payload: 'house:kzn_0018',
+    });
+    assert.ok(r.ok);
+    assert.deepEqual(
+      [r.event.type, r.event.chatId, r.event.userId, r.event.payload, r.event.chatTitle, r.event.chatLink, r.event.dedupKey],
+      ['chat_created', '-200', '501', 'house:kzn_0018', 'Дом: ул. Баумана, д. 15', undefined, 'chat_created:-200'],
+    );
+  });
+
   it('bot_added / bot_removed в групповом чате → added / removed; канал — игнорируется', () => {
     const r = parseUpdate({ update_type: 'bot_added', timestamp: 5, chat_id: -100, user: { user_id: 7, name: 'Админ' }, is_channel: false });
     assert.ok(r.ok);
