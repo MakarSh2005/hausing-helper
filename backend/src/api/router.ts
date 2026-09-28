@@ -39,8 +39,8 @@ export interface ApiDeps {
   /** Файлы фото заявок. */
   photoStorage?: PhotoStorage;
   sessionPerIpPerMin?: number;
-  /** Бот присылает жильцу в диалог приглашение в чат дома или кнопку «Создать чат дома». */
-  offerHouseChat?: (maxUserId: string) => Promise<'offered' | 'invited' | 'pending' | 'manual' | 'no_dialog' | 'no_apartment'>;
+  /** Бот присылает жильцу в диалог приглашение в чат его дома (если чат есть). */
+  offerHouseChat?: (maxUserId: string) => Promise<string>;
 }
 
 const SessionBody = z.object({ web_app_data: z.string().min(1).max(8192) });
@@ -91,8 +91,6 @@ function apartmentView(a: ApartmentInfo, rating: { avg: number; count: number } 
     uk: h.manager ? { ...orgView(h.manager, true)!, rating: rating ? { avg: Math.round(rating.avg * 10) / 10, count: rating.count } : null } : null,
     // Чат дома в MAX — только если есть ссылка-приглашение: без неё жильцу некуда перейти
     house_chat: chat?.link ? { title: chat.title, link: chat.link, since: chat.createdAt.toISOString() } : null,
-    // ready — можно вступить; no_link — чат создан, ждём ссылку от владельца; none — чата нет, бот может создать
-    house_chat_state: chat?.link ? 'ready' : chat ? 'no_link' : 'none',
   };
 }
 
@@ -275,7 +273,7 @@ export function createApiRouter(deps: ApiDeps) {
     await deps.store.ensureUser(res.locals.userId);
     await deps.store.saveApartment(res.locals.userId, { houseId: house.id, number, entrance });
     log.info({ userId: res.locals.userId, house: house.code }, 'api: адрес изменён в мини-приложении');
-    // Как и после привязки в боте — бот предлагает чат нового дома (в диалоге с ботом)
+    // Как и после привязки в боте — бот присылает приглашение в чат нового дома, если он есть
     void deps.offerHouseChat?.(res.locals.userId).catch((err) => log.warn(`api: не удалось предложить чат дома — ${(err as Error).message}`));
     const a = await deps.store.getApartment(res.locals.userId);
     res.json({ apartment: a ? await fullApartment(res.locals.userId, a) : null });
@@ -501,17 +499,6 @@ export function createApiRouter(deps: ApiDeps) {
     }
     log.info({ userId: res.locals.userId, number: r?.number, rating: body.data.value }, `api: заявка ${r?.number} оценена на ${body.data.value}`);
     res.json(requestView(r!, clock(), !!deps.demoStatuses));
-  });
-
-  // ── чат дома в MAX: бот присылает кнопку «Создать чат дома» или приглашение ──
-  router.post('/house-chat/offer', auth, async (_req, res: Response<unknown, Locals>) => {
-    if (!deps.offerHouseChat) {
-      res.status(503).json({ error: 'unavailable' });
-      return;
-    }
-    const result = await deps.offerHouseChat(res.locals.userId);
-    log.info({ userId: res.locals.userId, result }, `api: чат дома — предложение ботом (${result})`);
-    res.json({ result });
   });
 
   // ── чат поддержки: автоответы на типовые вопросы ────────────────────────

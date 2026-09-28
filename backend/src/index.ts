@@ -74,6 +74,7 @@ async function main() {
     db, max, logger,
     options: {
       demoDueMinutes: config.DEMO_DUE_MINUTES,
+      houseChatAdmins: config.HOUSE_CHAT_ADMINS,
       // Код входа — во фрагменте (#): он не уходит на сервер в строке запроса и не попадает в логи.
       appLink: appBase
         ? (userId, path = '') => `${appBase}/app/${path}#t=${issueSessionToken(userId, appLinkKey, LINK_TTL_SEC)}`

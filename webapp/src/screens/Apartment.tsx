@@ -3,7 +3,7 @@ import type { Apartment as Apt } from '../api';
 import { phoneHref } from '../format';
 import { Field, orgName } from '../ui';
 
-export function Apartment(props: { apartment: Apt | null; onChangeAddress: () => void; onJoinChat: (link: string) => void; onCreateChat: () => void }) {
+export function Apartment(props: { apartment: Apt | null; onChangeAddress: () => void; onJoinChat: (link: string) => void }) {
   const a = props.apartment;
   if (!a) {
     return (
@@ -97,30 +97,6 @@ export function Apartment(props: { apartment: Apt | null; onChangeAddress: () =>
             <Button size="medium" stretched onClick={() => props.onJoinChat(a.house_chat!.link)}>
               Открыть чат дома
             </Button>
-          </div>
-        </section>
-      )}
-
-      {a.house_chat_state === 'none' && (
-        <section className="card" aria-labelledby="house-chat-new">
-          <span className="field__label" id="house-chat-new">
-            Чат дома в MAX
-          </span>
-          <div className="field__value" style={{ margin: '2px 0 4px' }}>
-            Чата вашего дома пока нет — бот создаст его. Вы станете владельцем, а соседям приложение предложит вступить.
-          </div>
-          <div style={{ marginTop: 12 }}>
-            <Button size="medium" stretched onClick={props.onCreateChat}>
-              Создать чат дома
-            </Button>
-          </div>
-        </section>
-      )}
-      {a.house_chat_state === 'no_link' && (
-        <section className="card">
-          <span className="field__label">Чат дома в MAX</span>
-          <div className="field__value" style={{ margin: '2px 0 0' }}>
-            Чат дома создан. Как только владелец добавит ссылку-приглашение, здесь появится кнопка «Открыть чат дома».
           </div>
         </section>
       )}

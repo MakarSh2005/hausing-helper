@@ -48,11 +48,14 @@ export interface BotOptions {
    * undefined — бот ещё не проверил токен или мини-приложение не подключено: тогда кнопка-ссылка.
    */
   openApp?: () => { webApp: string; contactId?: number } | undefined;
-  /** Пауза перед приветствием в новой группе (мс): если это чат, созданный кнопкой, придёт chat_created. */
-  groupGreetingDelayMs?: number;
+  /**
+   * MAX user_id сотрудников сервиса, которые могут привязывать групповые чаты к домам (HOUSE_CHAT_ADMINS).
+   * Пусто — привязать может любой администратор группы.
+   */
+  houseChatAdmins?: string[];
 }
 
-export type HouseChatOffer = 'offered' | 'invited' | 'pending' | 'manual' | 'no_dialog' | 'no_apartment';
+export type HouseChatOffer = 'invited' | 'none' | 'no_dialog' | 'no_apartment';
 
 /** Экран мини-приложения → start_param (только латиница, цифры, «_» и «-»). */
 export function appPayload(path?: string): string | undefined {
@@ -65,10 +68,7 @@ export function appPayload(path?: string): string | undefined {
 export type Bot = ((ev: ParsedEvent) => Promise<void>) & {
   /** Разослать напоминания по просроченным заявкам. Возвращает число отправленных. */
   remindOverdue(): Promise<number>;
-  /**
-   * Предложить жильцу чат дома в его диалоге с ботом: чат есть — ссылка «Вступить»; чата нет —
-   * кнопка «Создать чат дома» (по нажатию MAX создаёт группу, бот привязывает её к дому).
-   */
+  /** Прислать жильцу в диалог приглашение в чат его дома, если чат есть и у него есть ссылка. */
   offerHouseChat(maxUserId: string, dialogChatId?: string): Promise<HouseChatOffer>;
 };
 
@@ -296,8 +296,8 @@ export function createBot(deps: { store: BotStore; io: BotIO; logger: Logger; op
         'Подать заявку с фото и следить за ней можно в приложении.',
       ].join('\n'),
     );
-    // Чат дома — отдельным сообщением: он не должен мешать главным двум кнопкам
-    await offerHouseChat(ev.userId, ev.chatId).catch((err) => log.warn(`bot: не удалось предложить чат дома — ${describeError(err)}`));
+    // Приглашение в чат дома — отдельным сообщением: оно не должно мешать главным двум кнопкам
+    await offerHouseChat(ev.userId, ev.chatId).catch((err) => log.warn(`bot: не удалось пригласить в чат дома — ${describeError(err)}`));
   }
 
   /** «Сменить адрес»: старая квартира остаётся, пока не привязана новая — есть кнопка вернуться. */
@@ -453,26 +453,23 @@ export function createBot(deps: { store: BotStore; io: BotIO; logger: Logger; op
   // администратором; администратор чата командой «/дом <адрес>» привязывает его к дому. Жильцы этого
   // дома получают приглашение в мини-приложении. Остальные сообщения группы бот не читает и не хранит.
 
+  // Чат дома создаёт команда сервиса (API MAX не даёт боту создавать чаты и быть их владельцем),
+  // добавляет бота администратором и привязывает командой. Дальше бот сам приглашает жильцов.
   const GROUP_HELP = [
-    'Чтобы жильцы нашли этот чат в приложении «Жилищный помощник», администратор чата — отправьте адрес дома командой:',
+    'Я бот «Жилищный помощник». Чтобы сделать эту группу чатом жильцов дома, администратор — отправьте адрес дома командой:',
     '/дом Баумана 15',
     '',
-    'Боту нужны права администратора: так он видит ссылку-приглашение в чат. Если её не видно, добавьте ссылку в команду:',
+    'Боту нужны права администратора: так он видит ссылку-приглашение. Если её не видно, добавьте ссылку в команду:',
     '/дом Баумана 15 https://max.ru/…',
     '',
-    'На остальные сообщения чата бот не отвечает и не сохраняет их.',
+    'После привязки бот сам разошлёт приглашение всем жильцам этого дома. На остальные сообщения чата бот не отвечает и не сохраняет их.',
   ].join('\n');
 
   async function groupEvent(ev: ParsedEvent): Promise<void> {
     if (ev.type === 'added') {
       log.info({ chat: ev.chatId }, 'bot: добавлен в групповой чат');
-      // Чат, созданный кнопкой «Создать чат дома», привяжет chat_created — там своё приветствие
-      const delay = opts.groupGreetingDelayMs ?? 3000;
-      if (delay) await new Promise((r) => setTimeout(r, delay));
-      if (await store.houseChatByChat(ev.chatId)) return;
-      return io.send(ev.chatId, `Здравствуйте, соседи! ${GROUP_HELP}`);
+      return io.send(ev.chatId, `Здравствуйте! ${GROUP_HELP}`);
     }
-    if (ev.type === 'chat_created') return chatCreated(ev);
     if (ev.type === 'removed') {
       if (await store.unbindHouseChat(ev.chatId)) log.info({ chat: ev.chatId }, 'bot: удалён из чата дома — привязка снята');
       return;
@@ -493,6 +490,7 @@ export function createBot(deps: { store: BotStore; io: BotIO; logger: Logger; op
     const rights = await isChatAdmin(ev);
     if (!rights) return io.send(ev.chatId, 'Не получается узнать данные чата. Сделайте бота администратором чата и повторите команду.');
     if (!rights.ok) return io.send(ev.chatId, 'Привязать чат к дому может только администратор этого чата.');
+    if (!mayBind(ev.userId)) return io.send(ev.chatId, 'Привязывать чаты к домам могут только сотрудники сервиса «Жилищный помощник».');
     const info = rights.info;
 
     const linkArg = /(https:\/\/\S+)\s*$/.exec(args)?.[1];
@@ -511,15 +509,54 @@ export function createBot(deps: { store: BotStore; io: BotIO; logger: Logger; op
       return io.send(ev.chatId, `${why}\nПример: /дом Баумана 15`);
     }
     const house = match.houses[0]!;
+    const prev = await store.houseChatByHouse(house.id);
     await store.bindHouseChat({ houseId: house.id, chatId: ev.chatId, title: info?.title ?? null, link, boundBy: ev.userId });
     log.info({ chat: ev.chatId, house: house.code, link: !!link }, 'bot: чат дома привязан');
-    return io.send(
-      ev.chatId,
-      link
-        ? `Готово: этот чат — чат дома ${formatAddress(house)}. Жильцы этого дома увидят приглашение в приложении.`
-        : `Чат привязан к дому ${formatAddress(house)}, но ссылки-приглашения я не вижу. Пришлите её командой:\n/дом ${addressText} https://max.ru/…\nБез ссылки жильцы не смогут перейти в чат из приложения.`,
-    );
+    if (!link) {
+      return io.send(
+        ev.chatId,
+        `Чат привязан к дому ${formatAddress(house)}, но ссылки-приглашения я не вижу. Пришлите её командой:\n/ссылка https://max.ru/…\nКак только ссылка появится, бот разошлёт приглашение жильцам.`,
+      );
+    }
+    const sent = prev?.link === link && prev.chatId === ev.chatId ? null : await inviteHouse(house.id, link, info?.title ?? null);
+    return io.send(ev.chatId, welcomeText(formatAddress(house), sent));
   }
+
+  const mayBind = (userId: string) => !opts.houseChatAdmins?.length || opts.houseChatAdmins.includes(userId);
+
+  function welcomeText(address: string, invited: number | null): string {
+    return [
+      `Готово: это чат жильцов дома ${address}. Здесь удобно договариваться о собраниях, предупреждать об отключениях и делиться новостями дома.`,
+      'Заявки в управляющую компанию подавайте в приложении «Жилищный помощник» — там сроки по нормативам и напоминания.',
+      '',
+      invited === null
+        ? 'Приглашение жильцам уже было отправлено.'
+        : invited
+          ? `Бот отправил приглашение жильцам дома: ${invited}. Новым жильцам оно придёт сразу после привязки адреса.`
+          : 'Жильцов этого дома в сервисе пока нет — бот пригласит каждого сразу после привязки адреса.',
+    ].join('\n');
+  }
+
+  /** Разослать приглашение в чат всем жильцам дома, у которых есть диалог с ботом. Возвращает число отправленных. */
+  async function inviteHouse(houseId: string, link: string, title: string | null): Promise<number> {
+    const residents = await store.houseResidents(houseId);
+    const house = await store.getHouse(houseId);
+    let sent = 0;
+    for (const r of residents) {
+      if (!r.chatId) continue;
+      try {
+        await io.send(r.chatId, inviteText(house ? formatAddress(house) : 'вашего дома', title), [[btn.link('Вступить в чат дома', link)]]);
+        sent++;
+      } catch (err) {
+        log.warn({ userId: r.maxUserId }, `bot: не удалось отправить приглашение в чат дома — ${describeError(err)}`);
+      }
+    }
+    log.info({ house: house?.code, sent }, `bot: приглашения в чат дома разосланы — ${sent}`);
+    return sent;
+  }
+
+  const inviteText = (address: string, title: string | null) =>
+    `Для дома ${address} создан чат жильцов в MAX${title ? ` — «${title}»` : ''}: отключения, собрания, новости дома. Вступайте!`;
 
   /** Владелец или администратор группы? null — данные чата недоступны (бот не администратор). */
   async function isChatAdmin(ev: ParsedEvent): Promise<{ ok: boolean; info: { title: string | null; link: string | null; ownerId: string | null } | null } | null> {
@@ -537,47 +574,6 @@ export function createBot(deps: { store: BotStore; io: BotIO; logger: Logger; op
     '/ссылка https://max.ru/…',
   ].join('\n');
 
-  /** Жилец нажал «Создать чат дома» — MAX создал группу, бот в ней администратор. Привязываем к дому. */
-  async function chatCreated(ev: ParsedEvent): Promise<void> {
-    const code = /^house:([A-Za-z0-9_-]{1,64})$/.exec(ev.payload ?? '')?.[1];
-    const house = code ? await store.getHouseByCode(code) : null;
-    if (!house) {
-      log.warn({ chat: ev.chatId }, 'bot: создан чат без кода дома');
-      return io.send(ev.chatId, `Не понял, для какого дома этот чат. ${GROUP_HELP}`);
-    }
-    const existing = await store.houseChatByHouse(house.id);
-    if (existing && existing.chatId !== ev.chatId) {
-      // Два жильца нажали кнопку почти одновременно — у дома остаётся первый чат
-      log.info({ chat: ev.chatId, house: house.code }, 'bot: у дома уже есть чат — второй не привязываем');
-      await io.send(
-        ev.chatId,
-        existing.link
-          ? `У дома ${formatAddress(house)} уже есть чат жильцов: ${existing.link}\nЭтот чат можно удалить — бот из него выходит.`
-          : `У дома ${formatAddress(house)} уже есть чат жильцов — его создал другой житель, приглашение придёт в приложении. Этот чат можно удалить — бот из него выходит.`,
-      );
-      await io.leaveChat?.(ev.chatId).catch(() => {});
-      return;
-    }
-    let link = ev.chatLink && MAX_LINK.test(ev.chatLink) ? ev.chatLink : null;
-    let title = ev.chatTitle ?? null;
-    if (!link) {
-      const info = await io.chatInfo?.(ev.chatId).catch(() => null);
-      if (info?.link && MAX_LINK.test(info.link)) link = info.link;
-      title = title ?? info?.title ?? null;
-    }
-    await store.bindHouseChat({ houseId: house.id, chatId: ev.chatId, title, link, boundBy: ev.userId });
-    log.info({ chat: ev.chatId, house: house.code, link: !!link }, 'bot: чат дома создан кнопкой и привязан');
-    await io.send(
-      ev.chatId,
-      [
-        `Это чат жильцов дома ${formatAddress(house)}. Здесь удобно договариваться о собраниях, предупреждать об отключениях и делиться новостями дома.`,
-        'Заявки в управляющую компанию подавайте в приложении «Жилищный помощник» — там сроки по нормативам и напоминания.',
-        '',
-        link ? 'Жильцы этого дома увидят приглашение в приложении.' : LINK_HOWTO,
-      ].join('\n'),
-    );
-  }
-
   /** «/ссылка https://max.ru/…» — ссылка-приглашение для уже привязанного чата. */
   async function setLink(ev: ParsedEvent, url: string | undefined): Promise<void> {
     const bound = await store.houseChatByChat(ev.chatId);
@@ -586,10 +582,13 @@ export function createBot(deps: { store: BotStore; io: BotIO; logger: Logger; op
     if (!MAX_LINK.test(url)) return io.send(ev.chatId, 'Ссылка должна вести на max.ru — это ссылка-приглашение в этот чат.');
     const rights = await isChatAdmin(ev);
     if (!rights) return io.send(ev.chatId, 'Не получается узнать данные чата. Сделайте бота администратором чата и повторите команду.');
-    if (!rights.ok) return io.send(ev.chatId, 'Ссылку может указать только администратор этого чата.');
-    await store.bindHouseChat({ houseId: bound.houseId, chatId: ev.chatId, title: bound.title ?? rights.info?.title ?? null, link: url, boundBy: ev.userId });
+    if (!rights.ok || !mayBind(ev.userId)) return io.send(ev.chatId, 'Ссылку может указать только администратор этого чата.');
+    const title = bound.title ?? rights.info?.title ?? null;
+    await store.bindHouseChat({ houseId: bound.houseId, chatId: ev.chatId, title, link: url, boundBy: ev.userId });
     log.info({ chat: ev.chatId }, 'bot: ссылка на чат дома сохранена');
-    return io.send(ev.chatId, 'Спасибо! Теперь жильцы дома увидят приглашение в этот чат в приложении.');
+    const house = await store.getHouse(bound.houseId);
+    const sent = bound.link === url ? null : await inviteHouse(bound.houseId, url, title);
+    return io.send(ev.chatId, welcomeText(house ? formatAddress(house) : 'этого дома', sent));
   }
 
   // ─── предложение чата дома жильцу ──────────────────────────────────────
@@ -597,41 +596,13 @@ export function createBot(deps: { store: BotStore; io: BotIO; logger: Logger; op
   async function offerHouseChat(maxUserId: string, dialogChatId?: string): Promise<HouseChatOffer> {
     const apt = await store.getApartment(maxUserId);
     if (!apt) return 'no_apartment';
+    const hc = await store.houseChatByHouse(apt.house.id);
+    // Чата нет или у него ещё нет ссылки — жильцу ничего не пишем: приглашение придёт, когда чат будет готов
+    if (!hc?.link) return 'none';
     const chatId = dialogChatId ?? (await store.getChatId(maxUserId));
     if (!chatId) return 'no_dialog';
-    const address = formatAddress(apt.house);
-    const hc = await store.houseChatByHouse(apt.house.id);
-    if (hc?.link) {
-      await io.send(chatId, `У дома ${address} есть чат жильцов в MAX${hc.title ? ` — «${hc.title}»` : ''}: отключения, собрания, новости дома.`, [
-        [btn.link('Вступить в чат дома', hc.link)],
-      ]);
-      return 'invited';
-    }
-    if (hc) {
-      await io.send(chatId, `Чат жильцов дома ${address} уже создан. Как только его владелец добавит ссылку-приглашение, приложение предложит вам вступить.`);
-      return 'pending';
-    }
-    const text = [
-      `У дома ${address} пока нет чата жильцов в MAX.`,
-      'Нажмите кнопку — бот создаст чат дома: вы станете его владельцем, а остальным жильцам приложение само предложит вступить.',
-    ].join('\n');
-    try {
-      await io.send(chatId, text, [
-        [
-          btn.chat('Создать чат дома', {
-            title: `Дом: ${address}`,
-            description: 'Чат жильцов дома: отключения, собрания, новости. Создан ботом «Жилищный помощник».',
-            startPayload: `house:${apt.house.code}`,
-          }),
-        ],
-      ]);
-      return 'offered';
-    } catch (err) {
-      // MAX не принял кнопку создания чата — даём ручной способ
-      log.warn(`bot: MAX не принял кнопку создания чата — ${describeError(err)}`);
-      await io.send(chatId, `У дома ${address} пока нет чата жильцов в MAX. Создайте групповой чат, добавьте в него этого бота администратором и отправьте в чат: /дом ${apt.house.street.replace(/^(ул|пр-кт|пер|б-р|ш|пл|наб|проезд)\.?\s+/i, '')} ${apt.house.houseNumber}`);
-      return 'manual';
-    }
+    await io.send(chatId, inviteText(formatAddress(apt.house), hc.title), [[btn.link('Вступить в чат дома', hc.link)]]);
+    return 'invited';
   }
 
   async function route(ev: ParsedEvent): Promise<void> {
@@ -669,7 +640,7 @@ export function createBot(deps: { store: BotStore; io: BotIO; logger: Logger; op
   const chains = new Map<string, Promise<void>>();
   const handle = (ev: ParsedEvent): Promise<void> => {
     // Групповой чат — отдельно: ни состояния диалога, ни кнопок, ни извинений в общий чат
-    if (ev.type === 'added' || ev.type === 'removed' || ev.type === 'chat_created' || (ev.chatType !== undefined && ev.chatType !== 'dialog')) {
+    if (ev.type === 'added' || ev.type === 'removed' || (ev.chatType !== undefined && ev.chatType !== 'dialog')) {
       return groupEvent(ev).catch((err) => log.error({ chat: ev.chatId }, `bot: ошибка в групповом чате — ${describeError(err)}`));
     }
     const prev = chains.get(ev.userId) ?? Promise.resolve();

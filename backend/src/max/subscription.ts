@@ -1,7 +1,7 @@
 import type { Logger } from 'pino';
 import { describeError, type MaxClient } from './client.js';
 
-export const UPDATE_TYPES = ['message_created', 'bot_started', 'message_callback', 'bot_added', 'bot_removed', 'message_chat_created'];
+export const UPDATE_TYPES = ['message_created', 'bot_started', 'message_callback', 'bot_added', 'bot_removed'];
 
 export type SubscriptionResult = 'created' | 'existing';
 

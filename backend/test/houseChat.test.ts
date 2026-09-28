@@ -14,26 +14,20 @@ const say = (userId: string, text: string, chatId = GROUP): ParsedEvent => ({
   type: 'message', dedupKey: `g${seq++}`, user: { userId }, userId, chatId, chatType: 'chat', text, attachments: [], timestamp: 1,
 });
 
-function setup(chat: { title: string | null; link: string | null; ownerId: string | null }, admins = ['900'], opts: { rejectChatButton?: boolean } = {}) {
+function setup(chat: { title: string | null; link: string | null; ownerId: string | null }, admins = ['900'], opts: { staff?: string[] } = {}) {
   const store = memoryStore();
   const sent: Array<{ chat: string; text: string; kb: number; buttons: Button[] }> = [];
   const left: string[] = [];
   const io: BotIO = {
-    send: async (c, text, kb) => {
-      if (opts.rejectChatButton && kb?.flat().some((b) => b.type === 'chat')) throw new Error('MAX API 400: button type');
-      sent.push({ chat: c, text, kb: kb?.length ?? 0, buttons: (kb ?? []).flat() });
-    },
+    send: async (c, text, kb) => void sent.push({ chat: c, text, kb: kb?.length ?? 0, buttons: (kb ?? []).flat() }),
     answer: async () => {},
     chatInfo: async () => chat,
     chatAdmins: async () => admins,
     leaveChat: async (c) => void left.push(c),
   };
-  const bot = createBot({ store, io, logger: pino({ level: 'silent' }), options: { groupGreetingDelayMs: 0 } });
+  const bot = createBot({ store, io, logger: pino({ level: 'silent' }), options: { houseChatAdmins: opts.staff } });
   return { store, sent, bot, left };
 }
-const created = (chatId: string, payload: string, extra: Partial<ParsedEvent> = {}): ParsedEvent => ({
-  type: 'chat_created', dedupKey: `cc${chatId}`, user: { userId: '501' }, userId: '501', chatId, chatType: 'chat', payload, timestamp: 1, ...extra,
-});
 const BAUMANA = HOUSES.find((h) => h.code === 'kzn_0018')!;
 
 describe('чат дома в MAX', () => {
@@ -52,7 +46,7 @@ describe('чат дома в MAX', () => {
   it('администратор привязывает чат к дому — ссылка берётся из данных чата', async () => {
     const { bot, sent, store } = setup({ title: 'Баумана 15 — соседи', link: 'https://max.ru/join/abc', ownerId: '900' });
     await bot(say('900', '/дом Бауманна 15'));
-    assert.match(sent.at(-1)!.text, /^Готово: этот чат — чат дома ул\. Баумана, д\. 15/);
+    assert.match(sent.at(-1)!.text, /^Готово: это чат жильцов дома ул\. Баумана, д\. 15/);
     const house = HOUSES.find((h) => h.street === 'ул. Баумана' && h.houseNumber === '15')!;
     assert.deepEqual(store.houseChats.map((c) => [c.houseId, c.chatId, c.title, c.link]), [[house.id, GROUP, 'Баумана 15 — соседи', 'https://max.ru/join/abc']]);
 
@@ -110,74 +104,52 @@ describe('чат дома в MAX', () => {
   });
 });
 
-describe('бот создаёт чат дома кнопкой MAX', () => {
-  it('после привязки квартиры — кнопка «Создать чат дома» с названием и кодом дома', async () => {
-    const { bot, store, sent } = setup({ title: null, link: null, ownerId: null });
-    store.apartments.set('501', { houseId: BAUMANA.id, number: '5', entrance: null });
-    assert.equal(await bot.offerHouseChat('501', 'dlg-501'), 'offered');
-    const m = sent.at(-1)!;
-    assert.equal(m.chat, 'dlg-501');
-    assert.match(m.text, /пока нет чата жильцов в MAX[\s\S]*бот создаст чат дома/);
-    assert.deepEqual(m.buttons[0], {
-      type: 'chat', text: 'Создать чат дома', chat_title: 'Дом: ул. Баумана, д. 15',
-      chat_description: 'Чат жильцов дома: отключения, собрания, новости. Создан ботом «Жилищный помощник».', start_payload: 'house:kzn_0018',
-    });
-    assert.equal(await bot.offerHouseChat('no-apartment', 'dlg'), 'no_apartment');
+describe('чат дома: бот приглашает жильцов сам', () => {
+  it('чат привязан со ссылкой — бот рассылает приглашение всем жильцам дома, жильцам другого дома — нет', async () => {
+    const { bot, store, sent } = setup({ title: 'Дом: Баумана 15', link: 'https://max.ru/join/b15', ownerId: '900' });
+    store.apartments.set('501', { houseId: BAUMANA.id, number: '1', entrance: null });
+    store.apartments.set('502', { houseId: BAUMANA.id, number: '2', entrance: null });
+    store.apartments.set('503', { houseId: HOUSES.find((h) => h.id !== BAUMANA.id)!.id, number: '3', entrance: null });
+    await bot(say('900', '/дом Баумана 15'));
+    const invites = sent.filter((m) => m.chat.startsWith('dlg-'));
+    assert.deepEqual(invites.map((m) => m.chat).sort(), ['dlg-501', 'dlg-502']);
+    assert.match(invites[0]!.text, /^Для дома ул\. Баумана, д\. 15 создан чат жильцов в MAX — «Дом: Баумана 15»/);
+    assert.deepEqual(invites[0]!.buttons, [{ type: 'link', text: 'Вступить в чат дома', url: 'https://max.ru/join/b15' }]);
+    assert.match(sent.at(-1)!.text, /^Готово: это чат жильцов дома[\s\S]*отправил приглашение жильцам дома: 2/);
+
+    // Повторная команда с той же ссылкой — второй рассылки нет
+    await bot(say('900', '/дом Баумана 15'));
+    assert.equal(sent.filter((m) => m.chat.startsWith('dlg-')).length, 2);
+    assert.match(sent.at(-1)!.text, /уже было отправлено/);
   });
 
-  it('жилец нажал кнопку — MAX создал чат, бот привязал его к дому; ссылки нет — просит владельца', async () => {
-    const { bot, store, sent } = setup({ title: 'Дом: ул. Баумана, д. 15', link: null, ownerId: '501' }, ['501']);
-    await bot(created('-8001', 'house:kzn_0018'));
-    assert.deepEqual(store.houseChats.map((c) => [c.houseId, c.chatId, c.title, c.link]), [[BAUMANA.id, '-8001', 'Дом: ул. Баумана, д. 15', null]]);
-    assert.match(sent.at(-1)!.text, /^Это чат жильцов дома ул\. Баумана, д\. 15[\s\S]*\/ссылка https:\/\/max\.ru/);
-    assert.equal(sent.at(-1)!.chat, '-8001');
-
-    // Бот добавлен в этот же чат — второго приветствия с /дом нет
-    const before = sent.length;
-    await bot({ type: 'added', dedupKey: 'a1', user: { userId: '501' }, userId: '501', chatId: '-8001', chatType: 'chat', timestamp: 2 });
-    assert.equal(sent.length, before);
-
-    // Соседу пока — «ждём ссылку»
-    store.apartments.set('502', { houseId: BAUMANA.id, number: '6', entrance: null });
-    assert.equal(await bot.offerHouseChat('502', 'dlg-502'), 'pending');
-
-    // Владелец присылает ссылку — теперь соседи получают приглашение
-    await bot(say('777', '/ссылка https://max.ru/join/zzz', '-8001'));
-    assert.match(sent.at(-1)!.text, /только администратор/);
-    await bot(say('501', '/ссылка https://evil.example/x', '-8001'));
-    assert.match(sent.at(-1)!.text, /max\.ru/);
-    await bot(say('501', '/ссылка https://max.ru/join/zzz', '-8001'));
-    assert.match(sent.at(-1)!.text, /^Спасибо/);
-    assert.equal(store.houseChats[0]!.link, 'https://max.ru/join/zzz');
-    assert.equal(await bot.offerHouseChat('502', 'dlg-502'), 'invited');
-    assert.deepEqual(sent.at(-1)!.buttons, [{ type: 'link', text: 'Вступить в чат дома', url: 'https://max.ru/join/zzz' }]);
+  it('новый жилец привязал адрес — приглашение сразу; чата нет — жильцу ничего не пишем', async () => {
+    const { bot, store, sent } = setup({ title: null, link: null, ownerId: '900' });
+    store.apartments.set('504', { houseId: BAUMANA.id, number: '4', entrance: null });
+    assert.equal(await bot.offerHouseChat('504', 'dlg-504'), 'none');
+    assert.equal(sent.length, 0, 'ни «создайте чат», ни кнопок');
+    await store.bindHouseChat({ houseId: BAUMANA.id, chatId: '-9', title: null, link: 'https://max.ru/join/x', boundBy: '900' });
+    assert.equal(await bot.offerHouseChat('504', 'dlg-504'), 'invited');
+    assert.deepEqual(sent.at(-1)!.buttons, [{ type: 'link', text: 'Вступить в чат дома', url: 'https://max.ru/join/x' }]);
   });
 
-  it('ссылка пришла вместе с созданием — жильцы сразу получают приглашение', async () => {
-    const { bot, store, sent } = setup({ title: null, link: null, ownerId: '501' });
-    await bot(created('-8002', 'house:kzn_0018', { chatLink: 'https://max.ru/join/abc', chatTitle: 'Дом: ул. Баумана, д. 15' }));
-    assert.equal(store.houseChats[0]!.link, 'https://max.ru/join/abc');
-    assert.match(sent.at(-1)!.text, /увидят приглашение в приложении/);
+  it('ссылки не было — бот просит её; после «/ссылка» рассылает приглашения', async () => {
+    const { bot, store, sent } = setup({ title: 'Дом', link: null, ownerId: '900' });
+    store.apartments.set('505', { houseId: BAUMANA.id, number: '5', entrance: null });
+    await bot(say('900', '/дом Баумана 15'));
+    assert.match(sent.at(-1)!.text, /ссылки-приглашения я не вижу[\s\S]*\/ссылка/);
+    assert.equal(sent.filter((m) => m.chat.startsWith('dlg-')).length, 0);
+    await bot(say('900', '/ссылка https://max.ru/join/late'));
+    assert.deepEqual(sent.filter((m) => m.chat.startsWith('dlg-')).map((m) => m.chat), ['dlg-505']);
+    assert.equal(store.houseChats[0]!.link, 'https://max.ru/join/late');
   });
 
-  it('два жильца нажали кнопку одновременно — у дома остаётся первый чат, бот выходит из второго', async () => {
-    const { bot, store, sent, left } = setup({ title: null, link: null, ownerId: '502' });
-    await bot(created('-8003', 'house:kzn_0018', { chatLink: 'https://max.ru/join/first' }));
-    await bot(created('-8004', 'house:kzn_0018'));
-    assert.deepEqual(store.houseChats.map((c) => c.chatId), ['-8003']);
-    assert.match(sent.at(-1)!.text, /уже есть чат жильцов: https:\/\/max\.ru\/join\/first/);
-    assert.deepEqual(left, ['-8004']);
-  });
-
-  it('чат без кода дома — подсказка, привязки нет; MAX не принял кнопку — ручной способ', async () => {
-    const { bot, store, sent } = setup({ title: null, link: null, ownerId: '1' });
-    await bot(created('-8005', 'что-то'));
+  it('HOUSE_CHAT_ADMINS задан — привязать может только сотрудник сервиса', async () => {
+    const { bot, store, sent } = setup({ title: 'Дом', link: 'https://max.ru/join/z', ownerId: '900' }, ['900', '901'], { staff: ['901'] });
+    await bot(say('900', '/дом Баумана 15'));
+    assert.match(sent.at(-1)!.text, /только сотрудники сервиса/);
     assert.equal(store.houseChats.length, 0);
-    assert.match(sent.at(-1)!.text, /Не понял, для какого дома/);
-
-    const r = setup({ title: null, link: null, ownerId: null }, [], { rejectChatButton: true });
-    r.store.apartments.set('501', { houseId: BAUMANA.id, number: '5', entrance: null });
-    assert.equal(await r.bot.offerHouseChat('501', 'dlg'), 'manual');
-    assert.match(r.sent.at(-1)!.text, /\/дом Баумана 15$/);
+    await bot(say('901', '/дом Баумана 15'));
+    assert.equal(store.houseChats.length, 1);
   });
 });

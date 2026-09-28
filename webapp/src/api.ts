@@ -26,8 +26,6 @@ export interface Apartment {
   uk: (Org & { rating: { avg: number; count: number } | null }) | null;
   /** Чат дома в MAX (групповой чат, привязанный к дому ботом); null — чата нет. */
   house_chat: { title: string | null; link: string; since: string } | null;
-  /** ready — можно вступить; no_link — чат создан, ждём ссылку от владельца; none — чата нет, бот может создать. */
-  house_chat_state: 'ready' | 'no_link' | 'none';
 }
 
 export type Status = 'created' | 'accepted' | 'in_progress' | 'completed' | 'rejected' | 'cancelled';
@@ -306,8 +304,7 @@ export type SupportAction =
   | { type: 'address'; label: string }
   | { type: 'call'; label: string; phone: string }
   | { type: 'link'; label: string; url: string }
-  | { type: 'tab'; label: string; tab: 'apartment' | 'requests' | 'notifications' }
-  | { type: 'create_chat'; label: string };
+  | { type: 'tab'; label: string; tab: 'apartment' | 'requests' | 'notifications' };
 export interface SupportAnswer {
   topic: string;
   text: string;
@@ -321,17 +318,7 @@ async function support(text: string): Promise<SupportAnswer> {
   return (await res.json()) as SupportAnswer;
 }
 
-export type HouseChatOffer = 'offered' | 'invited' | 'pending' | 'manual' | 'no_dialog' | 'no_apartment';
-
-/** Попросить бота прислать в диалог кнопку «Создать чат дома» (или приглашение, если чат уже есть). */
-async function offerHouseChat(): Promise<HouseChatOffer> {
-  const res = await postJson('/api/house-chat/offer');
-  if (!res.ok) throw new NetworkError(`http ${res.status}`);
-  return ((await res.json()) as { result: HouseChatOffer }).result;
-}
-
 export const api = {
-  offerHouseChat,
   rate: rateRequest,
   supportStart: () => get<SupportAnswer>('/api/support/start'),
   support,

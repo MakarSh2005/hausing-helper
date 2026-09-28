@@ -128,35 +128,12 @@ export function App() {
   }, [route.name]);
   const unread = notifs.filter((n) => new Date(n.at).getTime() > seen).length;
 
-  // Чат дома в MAX: при первом открытии — приглашение вступить (чат есть) или создать (чата нет),
-  // пока жилец не ответил. Ключ ответа — ссылка чата или «create:<дом>»: новый чат предложим заново.
-  const apt = apartment.status === 'ok' ? apartment.value : null;
-  const houseChat = apt?.house_chat ?? null;
-  const inviteKey = houseChat ? houseChat.link : apt?.house_chat_state === 'none' ? `create:${apt.house.code}` : null;
+  // Чат дома в MAX: при первом открытии — приглашение вступить, пока жилец не ответил «Вступить» или «Не сейчас».
+  // Ключ ответа — ссылка чата: новый чат дома предложим заново.
+  const houseChat = apartment.status === 'ok' ? apartment.value?.house_chat ?? null : null;
   useEffect(() => {
-    setInvite(inviteKey && !houseChatPrompt.get(inviteKey) ? inviteKey : null);
-  }, [inviteKey]);
-  const createHouseChat = async () => {
-    if (inviteKey && !houseChat) houseChatPrompt.set(inviteKey, 'joined');
-    setInvite(null);
-    tap();
-    try {
-      const r = await api.offerHouseChat();
-      if (r === 'offered' || r === 'manual') {
-        setBanner({ text: 'Бот прислал вам кнопку «Создать чат дома» — нажмите её в чате с ботом. Чат появится в MAX, соседям приложение предложит вступить.' });
-        openBotChat(bot);
-      } else if (r === 'invited' || r === 'pending') {
-        // Пока жилец думал, чат уже создал сосед
-        loadApartment();
-        setBanner({ text: r === 'invited' ? 'Чат дома уже есть — бот прислал приглашение.' : 'Чат дома уже создан, ждём ссылку-приглашение от владельца.' });
-      } else if (r === 'no_dialog') {
-        setBanner({ text: 'Сначала напишите боту в чате MAX — например, /start, — затем нажмите «Создать чат дома» ещё раз.', warn: true });
-      }
-    } catch (e) {
-      if (e instanceof AuthError) setPhase({ kind: 'auth_error', problem: e.problem });
-      else setBanner({ text: 'Нет связи с сервером. Попробуйте ещё раз.', warn: true });
-    }
-  };
+    setInvite(houseChat && !houseChatPrompt.get(houseChat.link) ? houseChat.link : null);
+  }, [houseChat?.link]); // eslint-disable-line react-hooks/exhaustive-deps
   const joinHouseChat = (link: string) => {
     houseChatPrompt.set(link, 'joined');
     setInvite(null);
@@ -166,7 +143,7 @@ export function App() {
   const declineHouseChat = (link: string) => {
     houseChatPrompt.set(link, 'declined');
     setInvite(null);
-    setBanner({ text: houseChat ? 'Ссылка на чат дома всегда есть на вкладке «Квартира».' : 'Создать чат дома можно в любой момент на вкладке «Квартира».' });
+    setBanner({ text: 'Ссылка на чат дома всегда есть на вкладке «Квартира».' });
   };
 
   // Данные под текущий экран
@@ -329,31 +306,6 @@ export function App() {
         unread={route.name === 'notifications' ? 0 : unread}
         onBell={() => route.name !== 'notifications' && go({ name: 'notifications' })}
       />
-      {invite && apt && !houseChat && !isInner(route) && (
-        <section className="card invite" role="dialog" aria-labelledby="invite-new-title">
-          <div className="invite__head">
-            <span className="invite__icon" aria-hidden="true">
-              <svg width="22" height="22" viewBox="0 0 24 24">
-                <path d="M9 11a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7Zm-7 8c0-3 3.1-5.5 7-5.5 1.3 0 2.5.3 3.6.8A6 6 0 0 0 12 17v3H2v-1Zm16-5h2v3h3v2h-3v3h-2v-3h-3v-2h3v-3Z" fill="currentColor" />
-              </svg>
-            </span>
-            <div>
-              <div id="invite-new-title" className="field__value" style={{ fontWeight: 600 }}>
-                Создать чат вашего дома в MAX?
-              </div>
-              <span className="field__label">Бот создаст групповой чат дома, вы станете владельцем, а соседям приложение предложит вступить.</span>
-            </div>
-          </div>
-          <div className="invite__actions">
-            <button className="invite__btn invite__btn--primary" onClick={() => void createHouseChat()}>
-              Создать чат
-            </button>
-            <button className="invite__btn" onClick={() => declineHouseChat(invite)}>
-              Не сейчас
-            </button>
-          </div>
-        </section>
-      )}
       {invite && houseChat && !isInner(route) && (
         <section className="card invite" role="dialog" aria-labelledby="invite-title">
           <div className="invite__head">
@@ -479,7 +431,7 @@ export function App() {
       )}
       {route.name === 'apartment' && (
         <DataView data={apartment} retry={loadApartment}>
-          {(a) => <Apartment apartment={a} onChangeAddress={() => go({ name: 'address' })} onJoinChat={joinHouseChat} onCreateChat={() => void createHouseChat()} />}
+          {(a) => <Apartment apartment={a} onChangeAddress={() => go({ name: 'address' })} onJoinChat={joinHouseChat} />}
         </DataView>
       )}
       {route.name === 'support' && (
@@ -488,7 +440,6 @@ export function App() {
           onOpenRequest={(id) => go({ name: 'request', id })}
           onAddress={() => go({ name: 'address' })}
           onTab={(tab) => go({ name: tab })}
-          onCreateChat={() => void createHouseChat()}
           onAuthError={onSupportAuthError}
         />
       )}

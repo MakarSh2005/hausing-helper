@@ -19,7 +19,6 @@ export interface SupportHandlers {
   onOpenRequest: (id: string) => void;
   onAddress: () => void;
   onTab: (tab: 'apartment' | 'requests' | 'notifications') => void;
-  onCreateChat: () => void;
   onAuthError: (e: AuthError) => void;
 }
 
@@ -92,8 +91,7 @@ export function Support(props: SupportHandlers) {
         return;
       case 'link':
         return openMaxUrl(a.url);
-      case 'create_chat':
-        return props.onCreateChat();
+
     }
   }
 

@@ -58,7 +58,7 @@ describe('устойчивость (этап 9)', () => {
     await bot(msg('42'));
     await tapBtn('2');
     assert.deepEqual(out.findLast((o) => /Готово!/.test(o.text))!.buttons.map((b) => b.text), ['Приложение с заявками', 'Сменить адрес']);
-    assert.match(out.at(-1)!.text, /пока нет чата жильцов/, 'следом — предложение создать чат дома');
+    assert.match(out.at(-1)!.text, /^Готово!/, 'чата дома нет — жильцу не предлагаем его создавать');
     for (const [description, category] of [['Течёт батарея', 'heating'], ['Не работает лифт', 'elevator'], ['Не вывозят мусор третий день', 'garbage']]) {
       const r = await submitRequest(store, U, { description: description!, category: category! }, new Date(clock.now));
       assert.ok(r.ok && !r.duplicate);

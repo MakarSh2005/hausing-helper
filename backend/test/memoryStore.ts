@@ -135,6 +135,7 @@ export function memoryStore(houses = HOUSES) {
       const a = apartments.get(u);
       return (a && houseChats.find((c) => c.houseId === a.houseId)) || null;
     },
+    houseResidents: async (houseId) => [...apartments.entries()].filter(([, a]) => a.houseId === houseId).map(([u]) => ({ maxUserId: u, chatId: `dlg-${u}` })),
     houseChatByHouse: async (houseId) => houseChats.find((c) => c.houseId === houseId) ?? null,
     houseChatByChat: async (chatId) => houseChats.find((c) => c.chatId === chatId) ?? null,
     bindHouseChat: async (c) => {

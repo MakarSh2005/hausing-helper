@@ -170,6 +170,8 @@ export interface BotStore {
   houseChat(maxUserId: string): Promise<HouseChatInfo | null>;
   houseChatByChat(chatId: string): Promise<HouseChatInfo | null>;
   houseChatByHouse(houseId: string): Promise<HouseChatInfo | null>;
+  /** Жильцы дома и их диалоги с ботом — для рассылки приглашения в чат дома. */
+  houseResidents(houseId: string): Promise<Array<{ maxUserId: string; chatId: string | null }>>;
   /** Привязать групповой чат к дому. Один чат — один дом; у дома — один чат (новый заменяет старый). */
   bindHouseChat(c: { houseId: string; chatId: string; title: string | null; link: string | null; boundBy: string }): Promise<void>;
   unbindHouseChat(chatId: string): Promise<boolean>;
@@ -453,6 +455,10 @@ export function createPrismaStore(db: Db, opts: { cacheMs?: number } = {}): BotS
     async houseChatByHouse(houseId) {
       const c = await db.houseChat.findUnique({ where: { houseId } });
       return c ? toHouseChat(c) : null;
+    },
+    async houseResidents(houseId) {
+      const rows = await db.apartment.findMany({ where: { houseId }, select: { user: { select: { maxUserId: true, maxChatId: true } } }, take: 2000 });
+      return rows.map((r) => ({ maxUserId: r.user.maxUserId, chatId: r.user.maxChatId }));
     },
     async houseChatByChat(chatId) {
       const c = await db.houseChat.findUnique({ where: { chatId } });

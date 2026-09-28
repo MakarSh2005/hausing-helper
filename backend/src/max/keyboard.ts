@@ -13,8 +13,7 @@ export type Button =
    */
   | { type: 'open_app'; text: string; web_app: string; contact_id?: number; payload?: string; fallbackUrl?: string }
   | { type: 'request_contact'; text: string }
-  | { type: 'request_geo_location'; text: string; quick?: boolean }
-  | { type: 'chat'; text: string; chat_title: string; chat_description?: string; start_payload?: string };
+  | { type: 'request_geo_location'; text: string; quick?: boolean };
 
 export interface InlineKeyboardAttachment {
   type: 'inline_keyboard';
@@ -41,19 +40,6 @@ export const btn = {
       ...(app.contactId !== undefined ? { contact_id: app.contactId } : {}),
       ...(app.payload ? { payload: app.payload } : {}),
       ...(app.fallbackUrl ? { fallbackUrl: app.fallbackUrl } : {}),
-    };
-  },
-  /**
-   * Кнопка создания группового чата: по нажатию MAX создаёт чат с этим названием, нажавший — владелец,
-   * бот — администратор; боту приходит message_chat_created со start_payload.
-   */
-  chat(text: string, c: { title: string; description?: string; startPayload?: string }): Button {
-    return {
-      type: 'chat',
-      text,
-      chat_title: c.title.slice(0, 128),
-      ...(c.description ? { chat_description: c.description.slice(0, 256) } : {}),
-      ...(c.startPayload ? { start_payload: c.startPayload.slice(0, 512) } : {}),
     };
   },
   contact(text: string): Button {

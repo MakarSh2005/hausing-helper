@@ -19,8 +19,7 @@ export type SupportAction =
   | { type: 'address'; label: string }
   | { type: 'call'; label: string; phone: string }
   | { type: 'link'; label: string; url: string }
-  | { type: 'tab'; label: string; tab: 'apartment' | 'requests' | 'notifications' }
-  | { type: 'create_chat'; label: string };
+  | { type: 'tab'; label: string; tab: 'apartment' | 'requests' | 'notifications' };
 
 export interface SupportAnswer {
   topic: string;
@@ -338,24 +337,11 @@ const TOPICS: Topic[] = [
           suggestions: [S.address, S.privacy],
         };
       }
-      if (hc) {
-        return {
-          topic: 'chat',
-          text: 'Чат вашего дома в MAX уже создан. Как только его владелец добавит ссылку-приглашение, приложение предложит вам вступить.',
-          actions: [],
-          suggestions: [S.submit, S.privacy],
-        };
-      }
       return {
         topic: 'chat',
-        text: ctx.apartment
-          ? [
-              'Чата вашего дома в MAX пока нет — бот создаст его.',
-              'Нажмите «Создать чат дома»: бот пришлёт кнопку в чат с ним, по нажатию MAX создаст чат дома. Вы станете его владельцем, а остальным жильцам приложение само предложит вступить.',
-            ].join('\n')
-          : 'Чат дома привязан к адресу. Укажите адрес — и бот предложит чат вашего дома или создаст его.',
-        actions: ctx.apartment ? [{ type: 'create_chat', label: 'Создать чат дома' }] : noAddress(ctx),
-        suggestions: [S.address, S.privacy],
+        text: 'Чата вашего дома в MAX пока нет. Чаты домов подключаются постепенно — как только чат вашего дома появится, бот сам пришлёт вам приглашение, а в приложении появится кнопка «Вступить в чат».',
+        actions: [],
+        suggestions: [S.submit, S.privacy],
       };
     },
   },
