@@ -12,7 +12,6 @@ import { issueSessionToken, linkSecret } from '../src/auth/sessionToken.js';
 import { signWebAppData } from '../src/auth/webAppData.js';
 import type { Db } from '../src/db.js';
 import { clock, HOUSES, memoryStore } from './memoryStore.js';
-import { createChatFileStore } from '../src/chat/files.js';
 
 const TOKEN = 'test-bot-token-1234567890';
 const SECRET = 's'.repeat(40);
@@ -58,7 +57,6 @@ describe('API мини-приложения', () => {
     const api = createApiRouter({
       store, logger, botToken: TOKEN, sessionSecret: SECRET, sessionTtlSec: 3600,
       demoStatuses: true, now: () => new Date(clock.now), perUserPerMin: 40,
-      chatFiles: createChatFileStore(path.join(webappDir, 'data')),
     });
     server = createApp({ db, logger, webhook, api, webappDir }).listen(0);
     await new Promise((r) => server.once('listening', r));
@@ -319,193 +317,36 @@ describe('API мини-приложения', () => {
     clock.now -= 60_000;
   });
 
-  it('чат дома: только свой дом, профиль MAX без user_id, удаление своего, непрочитанные, флуд и пустые сообщения', async () => {
-    const [A, B, C] = ['70001', '70002', '70003'];
-    for (const u of [A, B, C]) store.chatState.delete(u);
-    store.chat.length = 0;
-    await store.ensureUser(A, { name: 'Анна Петрова', username: 'anna_p', photoUrl: 'https://i.max.ru/a.jpg' });
-    await store.ensureUser(B, { name: 'Борис' });
-    await store.ensureUser(C, { name: 'Вера' });
-    await store.saveApartment(A, { houseId: HOUSES[0]!.id, number: '1', entrance: null });
-    await store.saveApartment(B, { houseId: HOUSES[0]!.id, number: '2', entrance: null });
-    await store.saveApartment(C, { houseId: HOUSES[1]!.id, number: '3', entrance: null });
-    const post = (u: string, text: string) => call('/api/chat', { method: 'POST', token: tokenFor(u), body: JSON.stringify({ text }) });
-
-    clock.now += 1000;
-    const sent = await post(A, '  Кто знает, когда дадут горячую воду?  ');
-    assert.equal(sent.status, 201);
-    const m = (await sent.json()) as { id: string; text: string; mine: boolean; author: Record<string, unknown> };
-    assert.equal(m.text, 'Кто знает, когда дадут горячую воду?');
-    assert.deepEqual(m.author, { key: m.author.key, name: 'Анна Петрова', username: 'anna_p', photo_url: 'https://i.max.ru/a.jpg' });
-    assert.ok(!JSON.stringify(m).includes(A), 'user_id MAX соседям не отдаём');
-
-    assert.equal(((await (await call('/api/chat/unread', { token: tokenFor(B) })).json()) as { count: number }).count, 1);
-    const chatB = (await (await call('/api/chat', { token: tokenFor(B) })).json()) as { available: boolean; members: number; address: string; messages: Array<{ mine: boolean; author: { name: string } }> };
-    assert.equal(chatB.available, true);
-    assert.equal(chatB.members, 2);
-    assert.equal(chatB.messages.length, 1);
-    assert.equal(chatB.messages[0]!.mine, false);
-    assert.equal(((await (await call('/api/chat/unread', { token: tokenFor(B) })).json()) as { count: number }).count, 0, 'открыл — прочитал');
-
-    const chatC = (await (await call('/api/chat', { token: tokenFor(C) })).json()) as { messages: unknown[] };
-    assert.equal(chatC.messages.length, 0, 'чат другого дома не виден');
-    assert.deepEqual(await (await call('/api/chat', { token: tokenFor('70009') })).json(), { available: false });
-    assert.equal((await post('70009', 'привет')).status, 409, 'без квартиры писать нельзя');
-
-    assert.equal((await post(B, '   ')).status, 400);
-    assert.equal((await post(B, 'а'.repeat(1001))).status, 400);
-    assert.equal((await call(`/api/chat/${m.id}`, { method: 'DELETE', token: tokenFor(B) })).status, 404, 'чужое не удалить');
-    assert.equal((await call(`/api/chat/${m.id}`, { method: 'DELETE', token: tokenFor(A) })).status, 200);
-    const afterDel = (await (await call('/api/chat', { token: tokenFor(B) })).json()) as { messages: Array<{ text: string | null; deleted: boolean }> };
-    assert.deepEqual([afterDel.messages[0]!.text, afterDel.messages[0]!.deleted], [null, true]);
-
-    const codes: number[] = [];
-    for (let i = 0; i < 11; i++) codes.push((await post(C, `сообщение ${i}`)).status);
-    assert.deepEqual([codes[9], codes[10]], [201, 429], 'не больше 10 сообщений в минуту');
+  it('чат дома в MAX: ссылка в /me и приглашение в уведомлениях — только жильцам этого дома и только со ссылкой', async () => {
+    const [A, B] = ['75001', '75002'];
+    store.apartments.set(A, { houseId: HOUSES[4]!.id, number: '1', entrance: null });
+    store.apartments.set(B, { houseId: HOUSES[5]!.id, number: '1', entrance: null });
+    type Me = { apartment: { house_chat: { title: string | null; link: string; since: string } | null } };
+    const me = async (u: string) => ((await (await call('/api/me', { token: tokenFor(u) })).json()) as Me).apartment.house_chat;
+    const invites = async (u: string) =>
+      ((await (await call('/api/notifications', { token: tokenFor(u) })).json()) as { items: Array<{ kind: string; link: string | null }> }).items.filter((n) => n.kind === 'house_chat');
+    assert.equal(await me(A), null);
+    await store.bindHouseChat({ houseId: HOUSES[4]!.id, chatId: '-1', title: 'Соседи', link: null, boundBy: '1' });
+    assert.equal(await me(A), null, 'без ссылки приглашать некуда');
+    await store.bindHouseChat({ houseId: HOUSES[4]!.id, chatId: '-1', title: 'Соседи', link: 'https://max.ru/join/q', boundBy: '1' });
+    assert.deepEqual(await me(A), { title: 'Соседи', link: 'https://max.ru/join/q', since: (await me(A))!.since });
+    assert.deepEqual((await invites(A)).map((n) => n.link), ['https://max.ru/join/q']);
+    assert.equal(await me(B), null, 'другой дом');
+    assert.equal((await invites(B)).length, 0);
   });
 
-  it('чат дома: уведомления по желанию — сводка ботом не чаще раза в 10 минут, при смене дома — новый чат', async () => {
-    const [A, B] = ['71001', '71002'];
-    store.chat.length = 0;
-    await store.ensureUser(A, { name: 'Анна' });
-    await store.saveApartment(A, { houseId: HOUSES[0]!.id, number: '1', entrance: null });
-    await store.saveApartment(B, { houseId: HOUSES[0]!.id, number: '2', entrance: null });
-    const tB = tokenFor(B);
-    clock.now += 1000;
-    await store.postChat(A, { text: 'до включения уведомлений' }, new Date(clock.now));
-    assert.equal((await store.chatDigests(new Date(clock.now), 600_000)).filter((d) => d.maxUserId === B).length, 0, 'по умолчанию выключены');
-
-    const on = await call('/api/chat/notify', { method: 'PUT', token: tB, body: JSON.stringify({ on: true }) });
-    assert.deepEqual(await on.json(), { notify: true });
-    assert.equal(((await (await call('/api/chat', { token: tB })).json()) as { notify: boolean }).notify, true);
-    clock.now += 11 * 60_000;
-    await store.postChat(A, { text: 'Лифт снова стоит' }, new Date(clock.now));
-    await store.postChat(A, { text: 'Позвонила в УК' }, new Date(clock.now + 1));
-    const digests = (await store.chatDigests(new Date(clock.now + 2), 600_000)).filter((d) => d.maxUserId === B);
-    assert.equal(digests.length, 1);
-    assert.deepEqual([digests[0]!.count, digests[0]!.last], [2, { name: 'Анна', text: 'Позвонила в УК', kind: 'text', fileName: null, duration: null }], 'старое сообщение (до включения) не в сводке');
-    await store.markChatNotified(B, new Date(clock.now + 2));
-    await store.postChat(A, { text: 'ещё одно' }, new Date(clock.now + 3));
-    assert.equal((await store.chatDigests(new Date(clock.now + 60_000), 600_000)).filter((d) => d.maxUserId === B).length, 0, 'тишина 10 минут');
-
-    await call('/api/chat/notify', { method: 'PUT', token: tB, body: JSON.stringify({ on: false }) });
-    assert.equal((await store.chatDigests(new Date(clock.now + 3_600_000), 600_000)).filter((d) => d.maxUserId === B).length, 0, 'выключил — тишина');
-
-    // Переезд: в новом доме старые сообщения не считаются непрочитанными
-    await store.postChat(A, { text: 'в старом доме' }, new Date(clock.now + 4));
-    clock.now += 60_000;
-    await store.saveApartment(A, { houseId: HOUSES[1]!.id, number: '9', entrance: null });
-    await store.saveApartment(B, { houseId: HOUSES[1]!.id, number: '9', entrance: null });
-    assert.equal(await store.chatUnread(B), 0);
-    clock.now -= 12 * 60_000 + 2000;
-  });
-
-  it('чат дома: фото, голосовое и файл — тип по содержимому, выдача по подписанной ссылке, удаление вместе с файлом', async () => {
-    const [A, B, C] = ['72001', '72002', '72003'];
-    await store.saveApartment(A, { houseId: HOUSES[0]!.id, number: '1', entrance: null });
-    await store.saveApartment(B, { houseId: HOUSES[0]!.id, number: '2', entrance: null });
-    await store.saveApartment(C, { houseId: HOUSES[1]!.id, number: '3', entrance: null });
-    const up = (u: string, q: string, body: Buffer) =>
-      fetch(`${base}/api/chat/upload?${q}`, { method: 'POST', headers: { authorization: `Bearer ${tokenFor(u)}`, 'content-type': 'application/octet-stream' }, body });
-    const jpg = Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xe0]), Buffer.alloc(100, 1)]);
-    const webm = Buffer.concat([Buffer.from([0x1a, 0x45, 0xdf, 0xa3]), Buffer.alloc(100, 2)]);
-    const pdf = Buffer.concat([Buffer.from('%PDF-1.7\n'), Buffer.alloc(100, 3)]);
-
-    type Att = { kind: string; name: string | null; size: number; duration: number | null; url: string };
-    const photo = await up(A, `kind=photo&caption=${encodeURIComponent('Вот что в подъезде')}`, jpg);
-    assert.equal(photo.status, 201);
-    const pm = (await photo.json()) as { id: string; text: string; attachment: Att };
-    assert.equal(pm.text, 'Вот что в подъезде');
-    assert.deepEqual([pm.attachment.kind, pm.attachment.size, pm.attachment.name], ['photo', jpg.length, null]);
-
-    const voice = (await (await up(A, 'kind=voice&duration=12.4', webm)).json()) as { attachment: Att };
-    assert.deepEqual([voice.attachment.kind, voice.attachment.duration], ['voice', 12]);
-    const file = (await (await up(A, `kind=file&name=${encodeURIComponent('../Акт осмотра.pdf')}`, pdf)).json()) as { id: string; attachment: Att };
-    assert.equal(file.attachment.name, 'Акт осмотра.pdf', 'без пути');
-
-    // Тип — по содержимому, а не по расширению или заголовку
-    assert.deepEqual(await (await up(A, 'kind=photo', pdf)).json(), { error: 'bad_media' });
-    assert.deepEqual(await (await up(A, 'kind=voice', jpg)).json(), { error: 'bad_media' });
-    assert.deepEqual(await (await up(A, 'kind=file&name=virus.exe', Buffer.from('MZ\x90\x00'))).json(), { error: 'bad_file_type' });
-    assert.deepEqual(await (await up(A, 'kind=file&name=fake.pdf', jpg)).json(), { error: 'bad_file_type' });
-    assert.deepEqual(await (await up(A, 'kind=file&name=page.txt', Buffer.from('<html><script>alert(1)</script>'))).json(), { error: 'bad_file_type' });
-    assert.equal((await up(A, 'kind=voice', Buffer.alloc(6 * 1024 * 1024, 1))).status, 413);
-    assert.equal((await up('72009', 'kind=photo', jpg)).status, 409, 'без квартиры');
-    assert.equal((await fetch(`${base}/api/chat/upload?kind=photo`, { method: 'POST', body: jpg })).status, 401);
-
-    // Сосед по дому видит вложения со ссылками; ссылка работает без заголовка авторизации
-    const chat = (await (await call('/api/chat', { token: tokenFor(B) })).json()) as { messages: Array<{ id: string; attachment: Att | null }> };
-    const got = chat.messages.filter((m) => m.attachment);
-    assert.equal(got.length, 3);
-    const img = await fetch(base + got[0]!.attachment!.url);
-    assert.equal(img.status, 200);
-    assert.equal(img.headers.get('content-type'), 'image/jpeg');
-    assert.equal(img.headers.get('x-content-type-options'), 'nosniff');
-    assert.deepEqual(Buffer.from(await img.arrayBuffer()), jpg);
-    const doc = await fetch(base + got[2]!.attachment!.url);
-    assert.equal(doc.headers.get('content-type'), 'application/octet-stream', 'документ — только скачиванием');
-    assert.match(doc.headers.get('content-disposition') ?? '', /^attachment; .*filename\*=UTF-8''%D0%90%D0%BA%D1%82/);
-    const audio = await fetch(base + got[1]!.attachment!.url, { headers: { range: 'bytes=0-3' } });
-    assert.equal(audio.status, 206, 'голосовое отдаётся частями (нужно Safari)');
-
-    // Без подписи, с чужой подписью или просроченной — 404
-    const u = new URL(base + got[0]!.attachment!.url);
-    assert.equal((await fetch(`${base}${u.pathname}`)).status, 404);
-    assert.equal((await fetch(`${base}/api/chat/files/${file.id}?t=${u.searchParams.get('t')}`)).status, 404, 'подпись от другого сообщения');
-    clock.now += 3 * 3_600_000;
-    assert.equal((await fetch(base + got[0]!.attachment!.url)).status, 404, 'ссылка устарела');
-    clock.now -= 3 * 3_600_000;
-
-    // Удаление — вместе с файлом
-    assert.equal((await call(`/api/chat/${pm.id}`, { method: 'DELETE', token: tokenFor(A) })).status, 200);
-    assert.equal((await fetch(base + got[0]!.attachment!.url)).status, 404);
-    assert.equal(fs.existsSync(path.join(webappDir, 'data', 'chat', `${pm.id}.jpg`)), false, 'файл удалён с диска');
-    const after = (await (await call('/api/chat', { token: tokenFor(B) })).json()) as { messages: Array<{ id: string; deleted: boolean; attachment: unknown }> };
-    assert.deepEqual(after.messages.find((m) => m.id === pm.id), { ...after.messages.find((m) => m.id === pm.id), deleted: true, attachment: null });
-  });
-
-  it('чат дома в колокольчике: только при включённых уведомлениях; прочитанное в чате — не новое', async () => {
-    const [A, B] = ['73001', '73002'];
-    await store.ensureUser(A, { name: 'Ольга' });
-    await store.saveApartment(A, { houseId: HOUSES[2]!.id, number: '1', entrance: null });
-    await store.saveApartment(B, { houseId: HOUSES[2]!.id, number: '2', entrance: null });
-    type N = { id: string; kind: string; title: string; text: string; read: boolean };
-    const notifs = async () => ((await (await call('/api/notifications', { token: tokenFor(B) })).json()) as { items: N[] }).items.filter((n) => n.kind === 'chat');
-    clock.now += 1000;
-    await store.postChat(A, { text: 'Воду отключат завтра с 9 до 12' }, new Date(clock.now));
-    assert.equal((await notifs()).length, 0, 'уведомления выключены — в колокольчике чата нет');
-
-    await call('/api/chat/notify', { method: 'PUT', token: tokenFor(B), body: JSON.stringify({ on: true }) });
-    clock.now += 1000;
-    await store.postChat(A, { text: '', attachment: { kind: 'voice', file: 'x.webm', name: null, size: 10, mime: 'audio/webm', duration: 7 } }, new Date(clock.now));
-    await store.postChat(B, { text: 'своё не показываем' }, new Date(clock.now + 1));
-    let items = await notifs();
-    assert.deepEqual(items.map((n) => [n.title, n.text]), [['Чат дома', 'Ольга: Голосовое сообщение (0:07)'], ['Чат дома', 'Ольга: Воду отключат завтра с 9 до 12']]);
-    // B написал в чат — всё, что раньше, прочитано
-    assert.ok(items.every((n) => n.read));
-    clock.now += 60_000;
-    await store.postChat(A, { text: 'Уже включили' }, new Date(clock.now));
-    items = await notifs();
-    assert.equal(items[0]!.text, 'Ольга: Уже включили');
-    assert.equal(items[0]!.read, false, 'новое — в счётчике колокольчика');
-    await call('/api/chat', { token: tokenFor(B) });
-    assert.equal((await notifs())[0]!.read, true, 'открыл чат — прочитано');
-  });
-
-  it('чат дома: галочки — одна, пока никто из соседей не открыл чат, две — после', async () => {
-    const [A, B] = ['74001', '74002'];
-    await store.saveApartment(A, { houseId: HOUSES[3]!.id, number: '1', entrance: null });
-    clock.now += 1000;
-    await store.saveApartment(B, { houseId: HOUSES[3]!.id, number: '2', entrance: null });
-    clock.now += 1000;
-    const sent = (await (await call('/api/chat', { method: 'POST', token: tokenFor(A), body: JSON.stringify({ text: 'Кто брал ключ от чердака?' }) })).json()) as { read: boolean };
-    assert.equal(sent.read, false, 'одна галочка');
-    const mine = async () => ((await (await call('/api/chat', { token: tokenFor(A) })).json()) as { messages: Array<{ mine: boolean; read: boolean | null }> }).messages;
-    assert.equal((await mine()).at(-1)!.read, false);
-    clock.now += 1000;
-    const forB = ((await (await call('/api/chat', { token: tokenFor(B) })).json()) as { messages: Array<{ read: boolean | null }> }).messages;
-    assert.equal(forB.at(-1)!.read, null, 'у чужих сообщений галочек нет');
-    assert.equal((await mine()).at(-1)!.read, true, 'сосед открыл чат — две галочки');
+  it('чат поддержки: приветствие и ответ по данным жильца; без токена — 401', async () => {
+    const U = '76001';
+    store.apartments.set(U, { houseId: HOUSES[0]!.id, number: '7', entrance: null });
+    const start = (await (await call('/api/support/start', { token: tokenFor(U) })).json()) as { text: string; suggestions: string[] };
+    assert.match(start.text, /Ваш адрес: .*кв\. 7/);
+    assert.ok(start.suggestions.includes('Как подать заявку?'));
+    const a = await call('/api/support', { method: 'POST', token: tokenFor(U), body: JSON.stringify({ text: 'Сколько ждать ремонта лифта?' }) });
+    const j = (await a.json()) as { topic: string; actions: Array<{ type: string; category?: string }> };
+    assert.equal(j.topic, 'category:elevator');
+    assert.ok(j.actions.some((x) => x.type === 'new_request' && x.category === 'elevator'));
+    assert.equal((await call('/api/support', { method: 'POST', body: JSON.stringify({ text: 'x' }) })).status, 401);
+    assert.equal((await call('/api/support', { method: 'POST', token: tokenFor(U), body: '{"text":5}' })).status, 400);
   });
 
   it('лимит запросов на пользователя → 429', async () => {

@@ -1,17 +1,17 @@
 import { useCallback, useEffect, useState } from 'react';
 import { api, AuthError, login, NetworkError, type Apartment as Apt, type AppNotification, type Catalog, type RequestItem } from './api';
 import { Header, Notifications } from './components';
-import { notifSeen } from './store';
-import { insideMax, openBotChat, startParam, tap, webApp } from './bridge';
+import { houseChatPrompt, notifSeen } from './store';
+import { insideMax, openBotChat, openMaxUrl, startParam, tap, webApp } from './bridge';
 import { Apartment } from './screens/Apartment';
 import { ChangeAddress } from './screens/ChangeAddress';
-import { Chat } from './screens/Chat';
+import { Support } from './screens/Support';
 import { NewRequest } from './screens/NewRequest';
 import { RequestDetails } from './screens/RequestDetails';
 import { Requests } from './screens/Requests';
 import { Loading, StateScreen } from './ui';
 
-type Route = { name: 'requests' } | { name: 'request'; id: string } | { name: 'apartment' } | { name: 'new' } | { name: 'notifications' } | { name: 'address' } | { name: 'chat' };
+type Route = { name: 'requests' } | { name: 'request'; id: string } | { name: 'apartment' } | { name: 'new' } | { name: 'notifications' } | { name: 'address' } | { name: 'support' };
 
 const BASE = '/app/';
 
@@ -23,7 +23,7 @@ function parseRoute(pathname: string): Route {
   if (/^new\/?$/.test(rest)) return { name: 'new' };
   if (/^notifications\/?$/.test(rest)) return { name: 'notifications' };
   if (/^address\/?$/.test(rest)) return { name: 'address' };
-  if (/^chat\/?$/.test(rest)) return { name: 'chat' };
+  if (/^(support|chat)\/?$/.test(rest)) return { name: 'support' };
   return { name: 'requests' };
 }
 /** Экран из параметра запуска бота: «apartment» или «req_<id>». */
@@ -36,13 +36,13 @@ function initialRoute(): Route {
   if (p === 'apartment') return { name: 'apartment' };
   if (p === 'new') return { name: 'new' };
   if (p === 'address') return { name: 'address' };
-  if (p === 'chat') return { name: 'chat' };
+  if (p === 'support') return { name: 'support' };
   return fromPath;
 }
 const routePath = (r: Route) =>
   BASE + (r.name === 'request' ? `requests/${r.id}` : r.name === 'requests' ? '' : r.name);
 /** Экраны без вкладок, с кнопкой «Назад». */
-const isInner = (r: Route) => r.name === 'request' || r.name === 'new' || r.name === 'notifications' || r.name === 'address' || r.name === 'chat';
+const isInner = (r: Route) => r.name === 'request' || r.name === 'new' || r.name === 'notifications' || r.name === 'address' || r.name === 'support';
 
 type Phase =
   | { kind: 'auth' }
@@ -66,7 +66,8 @@ export function App() {
   /** Граница «новых» на экране уведомлений — до того, как отметили их просмотренными. */
   const [seenBefore, setSeenBefore] = useState(0);
   const [newCategory, setNewCategory] = useState<string | null>(null);
-  const [chatUnread, setChatUnread] = useState(0);
+  /** Приглашение в чат дома в MAX показано и ещё без ответа (ключ — ссылка). */
+  const [invite, setInvite] = useState<string | null>(null);
 
   const fail = useCallback((err: unknown, set: (d: Data<never>) => void) => {
     if (err instanceof AuthError) setPhase({ kind: 'auth_error', problem: err.problem });
@@ -104,7 +105,6 @@ export function App() {
   // Уведомления: при входе, раз в минуту и при возвращении в приложение
   const loadNotifs = useCallback(() => {
     api.notifications().then((r) => setNotifs(r.items), () => {});
-    api.chatUnread().then((r) => setChatUnread(r.count), () => {});
   }, []);
   useEffect(() => {
     if (phase.kind !== 'ready') return;
@@ -126,16 +126,24 @@ export function App() {
     loadNotifs();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [route.name]);
-  const unread = notifs.filter((n) => !n.read && new Date(n.at).getTime() > seen).length;
+  const unread = notifs.filter((n) => new Date(n.at).getTime() > seen).length;
 
-  // Счётчик на кнопке чата — чаще, чем остальные уведомления: запрос лёгкий, а сообщения живые
+  // Чат дома в MAX: при первом открытии — приглашение, пока жилец не ответил «Вступить» или «Не сейчас»
+  const houseChat = apartment.status === 'ok' ? apartment.value?.house_chat ?? null : null;
   useEffect(() => {
-    if (phase.kind !== 'ready' || route.name === 'chat') return;
-    const t = setInterval(() => {
-      if (document.visibilityState === 'visible') api.chatUnread().then((r) => setChatUnread(r.count), () => {});
-    }, 15_000);
-    return () => clearInterval(t);
-  }, [phase.kind, route.name]);
+    setInvite(houseChat && !houseChatPrompt.get(houseChat.link) ? houseChat.link : null);
+  }, [houseChat?.link]); // eslint-disable-line react-hooks/exhaustive-deps
+  const joinHouseChat = (link: string) => {
+    houseChatPrompt.set(link, 'joined');
+    setInvite(null);
+    tap();
+    openMaxUrl(link);
+  };
+  const declineHouseChat = (link: string) => {
+    houseChatPrompt.set(link, 'declined');
+    setInvite(null);
+    setBanner({ text: 'Ссылка на чат дома всегда есть на вкладке «Квартира».' });
+  };
 
   // Данные под текущий экран
   useEffect(() => {
@@ -145,7 +153,7 @@ export function App() {
     if (route.name === 'new') {
       if (catalog.status !== 'ok') api.catalog().then((c) => setCatalog({ status: 'ok', value: c }), (e) => fail(e, setCatalog));
     }
-    if (route.name !== 'request' && route.name !== 'apartment') setBanner(null);
+    if (route.name !== 'request' && route.name !== 'apartment' && route.name !== 'requests') setBanner(null);
     if (route.name === 'request') {
       const cached = requests.status === 'ok' ? requests.value.find((r) => r.id === route.id) : undefined;
       setDetail(cached ? { status: 'ok', value: cached } : { status: 'loading' });
@@ -199,12 +207,7 @@ export function App() {
   }, [route, back]);
 
   const writeBot = () => openBotChat(bot);
-  const onChatAuthError = useCallback((e: AuthError) => setPhase({ kind: 'auth_error', problem: e.problem }), []);
-  // Открыли чат — прочитано: гасим и кнопку чата, и сообщения чата в колокольчике
-  const onChatRead = useCallback(() => {
-    setChatUnread(0);
-    setNotifs((ns) => (ns.some((n) => n.kind === 'chat' && !n.read) ? ns.map((n) => (n.kind === 'chat' ? { ...n, read: true } : n)) : ns));
-  }, []);
+  const onSupportAuthError = useCallback((e: AuthError) => setPhase({ kind: 'auth_error', problem: e.problem }), []);
 
   /** Заявка подана: открываем её карточку вместо формы (форма не остаётся в истории — «Назад» ведёт к списку). */
   const onCreated = (r: RequestItem, note: string | null) => {
@@ -302,6 +305,33 @@ export function App() {
         unread={route.name === 'notifications' ? 0 : unread}
         onBell={() => route.name !== 'notifications' && go({ name: 'notifications' })}
       />
+      {invite && houseChat && !isInner(route) && (
+        <section className="card invite" role="dialog" aria-labelledby="invite-title">
+          <div className="invite__head">
+            <span className="invite__icon" aria-hidden="true">
+              <svg width="22" height="22" viewBox="0 0 24 24">
+                <path d="M9 11a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7Zm7 0a3 3 0 1 0 0-6 3 3 0 0 0 0 6ZM2 19c0-3 3.1-5.5 7-5.5s7 2.5 7 5.5v1H2v-1Zm15.5 1v-1c0-1.9-.8-3.5-2.1-4.7.5-.1 1-.1 1.6-.1 3.3 0 5.9 2 5.9 4.6V20h-5.4Z" fill="currentColor" />
+              </svg>
+            </span>
+            <div>
+              <div id="invite-title" className="field__value" style={{ fontWeight: 600 }}>
+                У вашего дома есть чат в MAX
+              </div>
+              <span className="field__label">
+                {houseChat.title ? `«${houseChat.title}» — ` : ''}соседи обсуждают отключения, собрания и новости дома.
+              </span>
+            </div>
+          </div>
+          <div className="invite__actions">
+            <button className="invite__btn invite__btn--primary" onClick={() => joinHouseChat(houseChat.link)}>
+              Вступить в чат
+            </button>
+            <button className="invite__btn" onClick={() => declineHouseChat(houseChat.link)}>
+              Не сейчас
+            </button>
+          </div>
+        </section>
+      )}
       {!isInner(route) && (
         <div className="tabs" role="tablist" aria-label="Разделы">
           <button className="tab" role="tab" aria-selected={route.name === 'apartment'} onClick={() => onTab('apartment')}>
@@ -320,14 +350,14 @@ export function App() {
           </a>
         </div>
       )}
-      {(route.name === 'new' || route.name === 'notifications' || route.name === 'address' || route.name === 'chat') && (
+      {(route.name === 'new' || route.name === 'notifications' || route.name === 'address' || route.name === 'support') && (
         <h1 className="gutter" style={{ fontSize: 22, margin: '0 0 12px', color: 'var(--text-primary)' }}>
           {route.name === 'new'
             ? 'Новая заявка'
             : route.name === 'notifications'
               ? 'Уведомления'
-              : route.name === 'chat'
-                ? 'Чат дома'
+              : route.name === 'support'
+                ? 'Поддержка'
               : apartment.status === 'ok' && apartment.value
                 ? 'Сменить адрес'
                 : 'Указать адрес'}
@@ -339,10 +369,10 @@ export function App() {
           seenBefore={seenBefore}
           onOpenRequest={(id) => go({ name: 'request', id })}
           onJoin={(category) => openNew(category)}
-          onOpenChat={() => go({ name: 'chat' })}
+          onJoinChat={joinHouseChat}
         />
       )}
-      {banner && (route.name === 'request' || route.name === 'apartment') && (
+      {banner && (route.name === 'request' || route.name === 'apartment' || route.name === 'requests') && (
         <div className={`banner${banner.warn ? ' banner--warn' : ''}`} role="status" style={{ marginBottom: 12 }}>
           {banner.text}
         </div>
@@ -400,10 +430,18 @@ export function App() {
       )}
       {route.name === 'apartment' && (
         <DataView data={apartment} retry={loadApartment}>
-          {(a) => <Apartment apartment={a} onChangeAddress={() => go({ name: 'address' })} />}
+          {(a) => <Apartment apartment={a} onChangeAddress={() => go({ name: 'address' })} onJoinChat={joinHouseChat} />}
         </DataView>
       )}
-      {route.name === 'chat' && <Chat onAuthError={onChatAuthError} onNoAddress={() => go({ name: 'address' })} onRead={onChatRead} onNotifyChanged={loadNotifs} />}
+      {route.name === 'support' && (
+        <Support
+          onNewRequest={(c) => openNew(c)}
+          onOpenRequest={(id) => go({ name: 'request', id })}
+          onAddress={() => go({ name: 'address' })}
+          onTab={(tab) => go({ name: tab })}
+          onAuthError={onSupportAuthError}
+        />
+      )}
       {route.name === 'address' && (
         <DataView data={apartment} retry={loadApartment}>
           {(a) => (
@@ -418,14 +456,13 @@ export function App() {
       )}
       </div>
       {showFab && (
-        <button className="chat-fab" onClick={() => go({ name: 'chat' })} aria-label={chatUnread ? `Чат дома: новых сообщений — ${chatUnread}` : 'Чат дома'}>
+        <button className="chat-fab" onClick={() => go({ name: 'support' })} aria-label="Поддержка: ответы на частые вопросы" title="Поддержка">
           <svg width="26" height="26" viewBox="0 0 24 24" aria-hidden="true">
             <path
-              d="M4 4h16a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H9l-4.4 3.5A1 1 0 0 1 3 20.7V6a2 2 0 0 1 1-2Zm3 6.2a1.3 1.3 0 1 0 0 2.6 1.3 1.3 0 0 0 0-2.6Zm5 0a1.3 1.3 0 1 0 0 2.6 1.3 1.3 0 0 0 0-2.6Zm5 0a1.3 1.3 0 1 0 0 2.6 1.3 1.3 0 0 0 0-2.6Z"
+              d="M4 4h16a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H9l-4.4 3.5A1 1 0 0 1 3 20.7V6a2 2 0 0 1 1-2Zm7.1 10.3v1.6h1.8v-1.6h-1.8Zm.9-7.6c-1.8 0-3 1.1-3.1 2.8h1.8c.1-.8.6-1.2 1.3-1.2.7 0 1.2.4 1.2 1 0 .5-.2.8-.9 1.2-.9.5-1.3 1.1-1.2 2.2v.3h1.7v-.3c0-.6.2-.9.9-1.3.9-.5 1.4-1.2 1.4-2.2 0-1.5-1.3-2.5-3.1-2.5Z"
               fill="currentColor"
             />
           </svg>
-          {chatUnread > 0 && <span className="bell__badge">{chatUnread > 9 ? '9+' : chatUnread}</span>}
         </button>
       )}
     </main>

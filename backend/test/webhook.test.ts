@@ -77,6 +77,23 @@ describe('POST /webhook', () => {
   /** Обработка асинхронная — ждём, пока все события дойдут до роутера. */
   const settle = () => wh.drain(1000);
 
+  it('групповой чат: событие доходит до бота, но пользователь и его диалог не трогаются', async () => {
+    state.users.clear();
+    const group = clone(messageCreated);
+    group.message.recipient = { chat_id: -555, chat_type: 'chat' };
+    group.message.body.mid = 'mid.group1';
+    assert.equal((await post(group, SECRET)).status, 200);
+    const added = { update_type: 'bot_added', timestamp: 1758654000001, chat_id: -555, user: { user_id: 42, name: 'Админ' }, is_channel: false };
+    assert.equal((await post(added, SECRET)).status, 200);
+    await settle();
+    assert.deepEqual(routed.map((e) => [e.type, e.chatId, e.chatType]), [['message', '-555', 'chat'], ['added', '-555', 'chat']]);
+    assert.equal(state.users.size, 0, 'chat_id группы не записан как диалог с ботом');
+    // Канал — не наш случай
+    await post({ ...added, timestamp: 2, is_channel: true }, SECRET);
+    await settle();
+    assert.equal(routed.length, 2);
+  });
+
   it('GET /bot без данных о боте → 503', async () => {
     assert.equal((await fetch(`${base}/bot`)).status, 503);
   });

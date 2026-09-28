@@ -24,6 +24,8 @@ export interface Apartment {
     data_verified: boolean;
   };
   uk: (Org & { rating: { avg: number; count: number } | null }) | null;
+  /** Чат дома в MAX (групповой чат, привязанный к дому ботом); null — чата нет. */
+  house_chat: { title: string | null; link: string; since: string } | null;
 }
 
 export type Status = 'created' | 'accepted' | 'in_progress' | 'completed' | 'rejected' | 'cancelled';
@@ -54,14 +56,14 @@ export interface RequestItem {
 
 export interface AppNotification {
   id: string;
-  kind: 'status' | 'neighbors' | 'chat';
+  kind: 'status' | 'neighbors' | 'house_chat';
   at: string;
   title: string;
   text: string;
   request_id: string | null;
   category: string | null;
-  /** Сообщение чата уже прочитано в самом чате — в счётчик новых не входит. */
-  read?: boolean;
+  /** Приглашение в чат дома в MAX. */
+  link: string | null;
 }
 
 export type AuthProblem = 'no_launch_data' | 'expired' | 'rejected';
@@ -294,99 +296,32 @@ async function rateRequest(id: string, value: number, comment: string): Promise<
   throw new NetworkError(`http ${res.status}`);
 }
 
-// ─── чат дома ────────────────────────────────────────────────────────────
+// ─── чат поддержки ───────────────────────────────────────────────────────
 
-export interface ChatAuthor {
-  key: string;
-  name: string;
-  username: string | null;
-  photo_url: string | null;
-}
-export type ChatKind = 'photo' | 'voice' | 'file';
-export interface ChatAttachment {
-  kind: ChatKind;
-  name: string | null;
-  size: number;
-  duration: number | null;
-  /** Подписанная ссылка на файл (работает без авторизации около часа). */
-  url: string;
-}
-export interface ChatMsg {
-  id: string;
-  text: string | null;
-  deleted: boolean;
-  at: string;
-  mine: boolean;
-  /** Своё: false — одна галочка (отправлено), true — две (прочитал хотя бы один сосед). Чужое — null. */
-  read: boolean | null;
-  author: ChatAuthor;
-  attachment: ChatAttachment | null;
-}
-export type ChatData =
-  | { available: false }
-  | {
-      available: true;
-      address: string;
-      members: number;
-      notify: boolean;
-      can_notify: boolean;
-      has_more: boolean;
-      last_read_at: string | null;
-      max_text: number;
-      messages: ChatMsg[];
-      uploads: boolean;
-      limits: { photo: number; voice: number; file: number; voice_sec: number };
-    };
-export type ChatSendError = 'empty' | 'too_long' | 'too_fast' | 'no_apartment';
-export type ChatUploadError = 'too_long' | 'too_fast' | 'no_apartment' | 'too_big' | 'bad_media' | 'bad_file_type' | 'bad_kind';
-
-/** Вложение в чат: тело — байты, параметры — в строке запроса. */
-async function chatUpload(
-  kind: ChatKind,
-  blob: Blob,
-  opts: { name?: string; duration?: number; caption?: string } = {},
-): Promise<{ ok: true; message: ChatMsg } | { ok: false; error: ChatUploadError }> {
-  const q = new URLSearchParams({ kind });
-  if (opts.name) q.set('name', opts.name);
-  if (opts.duration) q.set('duration', String(Math.round(opts.duration)));
-  if (opts.caption?.trim()) q.set('caption', opts.caption.trim());
-  // Файл до 20 МБ по мобильному интернету — дольше обычных 10 секунд
-  const res = await authed(`/api/chat/upload?${q}`, { method: 'POST', headers: { 'content-type': 'application/octet-stream' }, body: blob, timeoutMs: 120_000 });
-  const b = (await res.json().catch(() => null)) as (ChatMsg & { error?: ChatUploadError }) | null;
-  if (res.status === 201 && b) return { ok: true, message: b };
-  if (res.status === 413) return { ok: false, error: 'too_big' };
-  if (b?.error && res.status < 500) return { ok: false, error: b.error };
-  throw new NetworkError(`http ${res.status}`);
+export type SupportAction =
+  | { type: 'new_request'; label: string; category?: string }
+  | { type: 'open_request'; label: string; id: string }
+  | { type: 'address'; label: string }
+  | { type: 'call'; label: string; phone: string }
+  | { type: 'link'; label: string; url: string }
+  | { type: 'tab'; label: string; tab: 'apartment' | 'requests' | 'notifications' };
+export interface SupportAnswer {
+  topic: string;
+  text: string;
+  actions: SupportAction[];
+  suggestions: string[];
 }
 
-async function chatSend(text: string): Promise<{ ok: true; message: ChatMsg } | { ok: false; error: ChatSendError }> {
-  const res = await postJson('/api/chat', { text });
-  const b = (await res.json().catch(() => null)) as (ChatMsg & { error?: ChatSendError }) | null;
-  if (res.status === 201 && b) return { ok: true, message: b };
-  if (b?.error && res.status < 500) return { ok: false, error: b.error };
-  throw new NetworkError(`http ${res.status}`);
-}
-
-async function chatDelete(id: string): Promise<boolean> {
-  const res = await authed(`/api/chat/${encodeURIComponent(id)}`, { method: 'DELETE' });
-  if (res.status >= 500) throw new NetworkError(`http ${res.status}`);
-  return res.ok;
-}
-
-async function chatNotify(on: boolean): Promise<boolean> {
-  const res = await authed('/api/chat/notify', { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ on }) });
+async function support(text: string): Promise<SupportAnswer> {
+  const res = await postJson('/api/support', { text });
   if (!res.ok) throw new NetworkError(`http ${res.status}`);
-  return ((await res.json()) as { notify: boolean }).notify;
+  return (await res.json()) as SupportAnswer;
 }
 
 export const api = {
   rate: rateRequest,
-  chat: (before?: string) => get<ChatData>(`/api/chat${before ? `?before=${encodeURIComponent(before)}` : ''}`),
-  chatUnread: () => get<{ count: number }>('/api/chat/unread'),
-  chatSend,
-  chatUpload,
-  chatDelete,
-  chatNotify,
+  supportStart: () => get<SupportAnswer>('/api/support/start'),
+  support,
   photo: photoBlob,
   cancel: cancelRequest,
   create: createRequest,

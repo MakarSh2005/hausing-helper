@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import type { ApartmentInfo, BotStore, ChatAttachment, ChatDigest, ChatMessage, HouseInfo, RequestInfo, Session, UserProfile } from '../src/bot/store.js';
+import type { ApartmentInfo, BotStore, HouseChatInfo, HouseInfo, RequestInfo, Session, UserProfile } from '../src/bot/store.js';
 import { isValidOrgInn } from '../src/domain/inn.js';
 
 /** Общие для тестов справочник домов (из настоящего файла данных) и in-memory хранилище. */
@@ -49,26 +49,7 @@ export function memoryStore(houses = HOUSES) {
   };
   const users = new Set<string>();
   const profiles = new Map<string, UserProfile>();
-  type ChatRow = { id: string; houseId: string; user: string; text: string; deleted: boolean; createdAt: Date; attachment: ChatAttachment | null };
-  const chat: ChatRow[] = [];
-  const chatState = new Map<string, { notify: boolean; lastReadAt: Date | null; lastNotifiedAt: Date | null }>();
-  const state = (u: string) => {
-    if (!chatState.has(u)) chatState.set(u, { notify: false, lastReadAt: null, lastNotifiedAt: null });
-    return chatState.get(u)!;
-  };
-  // Внутренний ключ автора — не user_id MAX (как users.id в БД).
-  const keyOf = (u: string) => `u-${Buffer.from(u).toString('hex')}`;
-  const chatView = (m: ChatRow, me: string): ChatMessage => ({
-    id: m.id, text: m.deleted ? null : m.text, createdAt: m.createdAt, mine: m.user === me,
-    author: { key: keyOf(m.user), name: profiles.get(m.user)?.name ?? null, username: profiles.get(m.user)?.username || null, photoUrl: profiles.get(m.user)?.photoUrl || null },
-    attachment: m.deleted ? null : m.attachment,
-  });
-  const unreadOf = (u: string, since: Date | null) => {
-    const a = apartments.get(u);
-    if (!a) return [];
-    return chat.filter((m) => m.houseId === a.houseId && m.user !== u && !m.deleted && (!since || m.createdAt > since));
-  };
-  let chatSeq = 0;
+  const houseChats: HouseChatInfo[] = [];
   const store: BotStore = {
     ensureUser: async (u, p = {}) => {
       users.add(u);
@@ -81,10 +62,7 @@ export function memoryStore(houses = HOUSES) {
     getSession: async (u) => structuredClone(sessions.get(u) ?? { state: 'idle', data: {} }),
     setSession: async (u, s) => void sessions.set(u, structuredClone(s)),
     getApartment: async (u) => apt(u),
-    saveApartment: async (u, a) => {
-      if (apartments.get(u)?.houseId !== a.houseId) Object.assign(state(u), { lastReadAt: new Date(clock.now), lastNotifiedAt: null });
-      apartments.set(u, { ...a });
-    },
+    saveApartment: async (u, a) => void apartments.set(u, { ...a }),
     createRequest: async (u, r) => {
       const a = apt(u);
       if (!a) throw new Error('квартира не привязана');
@@ -153,65 +131,21 @@ export function memoryStore(houses = HOUSES) {
       const rated = requests.filter((r) => mine?.house.manager && r.org === mine.house.manager && r.rating);
       return rated.length ? { avg: rated.reduce((s, r) => s + r.rating!.value, 0) / rated.length, count: rated.length } : null;
     },
-    chatView: async (u, opts) => {
+    houseChat: async (u) => {
       const a = apartments.get(u);
-      if (!a) return null;
-      const all = chat.filter((m) => m.houseId === a.houseId && (!opts.before || m.createdAt < opts.before));
-      const page = all.slice(-opts.limit);
-      return {
-        houseId: a.houseId,
-        members: [...apartments.values()].filter((x) => x.houseId === a.houseId).length,
-        messages: page.map((m) => chatView(m, u)),
-        hasMore: all.length > page.length,
-        notify: state(u).notify,
-        lastReadAt: state(u).lastReadAt,
-        othersReadAt: [...chatState.entries()]
-          .filter(([x]) => x !== u && apartments.get(x)?.houseId === a.houseId)
-          .map(([, st]) => st.lastReadAt)
-          .reduce<Date | null>((m, d) => (d && (!m || d > m) ? d : m), null),
-      };
+      return (a && houseChats.find((c) => c.houseId === a.houseId)) || null;
     },
-    postChat: async (u, msg, at) => {
-      const a = apartments.get(u);
-      if (!a) return null;
-      const m = { id: msg.id ?? `m${++chatSeq}`, houseId: a.houseId, user: u, text: msg.text, deleted: false, createdAt: at, attachment: msg.attachment ?? null };
-      chat.push(m);
-      state(u).lastReadAt = at;
-      return chatView(m, u);
+    houseChatByChat: async (chatId) => houseChats.find((c) => c.chatId === chatId) ?? null,
+    bindHouseChat: async (c) => {
+      for (let i = houseChats.length - 1; i >= 0; i--) if (houseChats[i]!.chatId === c.chatId || houseChats[i]!.houseId === c.houseId) houseChats.splice(i, 1);
+      houseChats.push({ houseId: c.houseId, chatId: c.chatId, title: c.title, link: c.link, createdAt: new Date(clock.now) });
     },
-    deleteChat: async (u, id) => {
-      const m = chat.find((x) => x.id === id && x.user === u && !x.deleted);
-      if (!m) return { ok: false, file: null };
-      m.deleted = true;
-      m.text = '';
-      const file = m.attachment?.file ?? null;
-      m.attachment = null;
-      return { ok: true, file };
+    unbindHouseChat: async (chatId) => {
+      const i = houseChats.findIndex((c) => c.chatId === chatId);
+      if (i < 0) return false;
+      houseChats.splice(i, 1);
+      return true;
     },
-    chatAttachment: async (id) => chat.find((x) => x.id === id && !x.deleted)?.attachment ?? null,
-    setChatNotify: async (u, on) => {
-      state(u).notify = on;
-      if (on) state(u).lastNotifiedAt = new Date(clock.now);
-    },
-    markChatRead: async (u, at) => void (state(u).lastReadAt = at),
-    chatUnread: async (u) => unreadOf(u, state(u).lastReadAt).length,
-    chatDigests: async (now, quietMs) => {
-      const out: ChatDigest[] = [];
-      for (const [u, s] of chatState) {
-        if (!s.notify || (s.lastNotifiedAt && now.getTime() - s.lastNotifiedAt.getTime() < quietMs)) continue;
-        const since = [s.lastReadAt, s.lastNotifiedAt].filter((d): d is Date => !!d).reduce<Date | null>((a, b) => (!a || b > a ? b : a), null);
-        const fresh = unreadOf(u, since);
-        const last = fresh.at(-1);
-        if (last) {
-          out.push({
-            maxUserId: u, chatId: 'c1', count: fresh.length,
-            last: { name: profiles.get(last.user)?.name ?? null, text: last.text, kind: last.attachment?.kind ?? 'text', fileName: last.attachment?.name ?? null, duration: last.attachment?.duration ?? null },
-          });
-        }
-      }
-      return out;
-    },
-    markChatNotified: async (u, at) => void (state(u).lastNotifiedAt = at),
     markReminded: async (id, at) => {
       const r = requests.find((x) => x.id === id);
       if (!r || r.reminderSentAt) return false;
@@ -219,7 +153,7 @@ export function memoryStore(houses = HOUSES) {
       return true;
     },
   };
-  return Object.assign(store, { apartments, requests, users, profiles, chat, chatState });
+  return Object.assign(store, { apartments, requests, users, profiles, houseChats });
 }
 
 /** Управляемые часы: 24.09.2026 12:00 МСК (четверг). */

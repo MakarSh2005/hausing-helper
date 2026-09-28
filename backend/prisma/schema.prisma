@@ -33,8 +33,6 @@ model User {
   apartment Apartment?
   session   UserSession?
   requests  Request[]
-  chatMessages HouseChatMessage[]
-  chatState    HouseChatState?
 
   @@map("users")
 }
@@ -125,7 +123,7 @@ model House {
   tariffs         Tariff[]
   capRepairWorks  CapitalRepairWork[]
   requests        Request[]
-  chatMessages    HouseChatMessage[]
+  chat            HouseChat?
 
   @@index([city, street])
   @@index([managerId])
@@ -254,50 +252,26 @@ model RequestCounter {
   @@map("request_counters")
 }
 
-// ─── Чат дома ────────────────────────────────────────────────────────────────
+// ─── Чат дома в MAX ──────────────────────────────────────────────────────────
 
-/// Сообщение в чате дома. Участники — жильцы с привязанной квартирой в этом доме.
-model HouseChatMessage {
-  id        String    @id @default(uuid())
-  houseId   String
-  userId    String
-  /// Текст или подпись к вложению (может быть пустой у фото, голосового и файла).
-  text      String
-  /// "text" | "photo" | "voice" | "file"
-  kind      String    @default("text")
-  /// Вложение на диске: <DATA_DIR>/chat/<id>.<ext>
-  file      String?
-  /// Имя файла, как его назвал автор (для документов).
-  fileName  String?
-  fileSize  Int?
-  /// Тип по сигнатуре файла: image/jpeg, audio/webm, application/octet-stream…
-  mime      String?
-  /// Длительность голосового, секунд.
-  duration  Int?
-  /// Автор удалил сообщение: текст и файл стираются, остаётся «Сообщение удалено».
-  deletedAt DateTime?
-  createdAt DateTime  @default(now())
+/// Групповой чат дома в MAX. API MAX не даёт боту создавать чаты и добавлять участников,
+/// поэтому чат создаёт человек и добавляет бота администратором, а бот привязывает его к дому
+/// командой «/дом <адрес>». Жильцы получают ссылку-приглашение в мини-приложении.
+model HouseChat {
+  id               String   @id @default(uuid())
+  houseId          String   @unique
+  /// chat_id группового чата в MAX
+  chatId           String   @unique
+  title            String?
+  /// Ссылка-приглашение (поле link чата или присланная командой)
+  link             String?
+  boundByMaxUserId String
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
 
   house House @relation(fields: [houseId], references: [id], onDelete: Cascade)
-  user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
 
-  @@index([houseId, createdAt])
-  @@map("house_chat_messages")
-}
-
-/// Состояние чата у жильца: уведомления (по желанию, по умолчанию выключены) и что уже прочитано.
-model HouseChatState {
-  userId         String    @id
-  notify         Boolean   @default(false)
-  /// Всё, что раньше, — прочитано. Сбрасывается на момент вступления при смене дома.
-  lastReadAt     DateTime?
-  /// Когда бот последний раз присылал сводку — не чаще раза в 10 минут.
-  lastNotifiedAt DateTime?
-  updatedAt      DateTime  @updatedAt
-
-  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
-
-  @@map("house_chat_state")
+  @@map("house_chats")
 }
 
 // ─── Служебные таблицы бота ──────────────────────────────────────────────────

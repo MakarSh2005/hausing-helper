@@ -1,5 +1,4 @@
 import { createApp } from './app.js';
-import { createChatFileStore } from './chat/files.js';
 import { createApiRouter } from './api/router.js';
 import { issueSessionToken, LINK_TTL_SEC, linkSecret, sessionSecret } from './auth/sessionToken.js';
 import { createRouter } from './bot/router.js';
@@ -104,8 +103,6 @@ async function main() {
     bot
       .remindOverdue()
       .catch((err) => logger.error(`напоминания: ошибка — ${describeError(err)}`))
-      .then(() => bot.notifyChat())
-      .catch((err) => logger.error(`чат дома: ошибка сводки — ${describeError(err)}`))
       .finally(() => (reminding = false));
   }, 60_000);
   reminders.unref();
@@ -119,7 +116,6 @@ async function main() {
     sessionTtlSec: config.SESSION_TTL_SECONDS,
     demoStatuses: config.MOCK_AUTO_STATUS_CHANGE,
     photoStorage,
-    chatFiles: createChatFileStore(config.DATA_DIR),
   });
   if (!config.SESSION_JWT_SECRET) logger.info('мини-приложение: ключ сессий производный от токена бота (SESSION_JWT_SECRET не задан)');
   const app = createApp({ db, logger, webhook, botInfo, api, webappDir: config.WEBAPP_DIR });

@@ -3,9 +3,9 @@ import type { Logger } from 'pino';
 import { z } from 'zod';
 import { issueSessionToken, linkSecret, verifySessionToken } from '../auth/sessionToken.js';
 import { validateWebAppData } from '../auth/webAppData.js';
-import type { ApartmentInfo, BotStore, ChatMessage, OrgInfo, RequestInfo } from '../bot/store.js';
+import type { ApartmentInfo, BotStore, HouseChatInfo, OrgInfo, RequestInfo } from '../bot/store.js';
 import { formatAddress, matchHouse } from '../domain/address.js';
-import { attachmentLabel, parseApartmentNumber } from '../bot/bot.js';
+import { parseApartmentNumber } from '../bot/bot.js';
 import { complaintText } from '../domain/complaint.js';
 import { MAX_PHOTOS } from '../domain/photos.js';
 import { CATEGORY_ORDER, NORMS } from '../domain/norms.js';
@@ -14,8 +14,7 @@ import { MAX_DESCRIPTION, MIN_DESCRIPTION, submitRequest, suggestCategory } from
 import { effectiveStatus, OPEN_STATUSES, STATUS_LABEL } from '../domain/requestStatus.js';
 import { CONTENT_TYPES, MAX_PHOTO_BYTES, sniffImage, type PhotoStorage } from '../photos/storage.js';
 import { SlidingWindowLimiter } from '../webhook/rateLimit.js';
-import crypto from 'node:crypto';
-import { CHAT_LIMITS, cleanFileName, detectChatFile, fileKey, MAX_VOICE_SEC, signFile, verifyFile, type ChatFileStore, type ChatKind } from '../chat/files.js';
+import { answerQuestion, greeting, type SupportContext } from '../support/faq.js';
 
 /**
  * API мини-приложения (ТЗ 5.2, этапы 6–7).
@@ -40,9 +39,6 @@ export interface ApiDeps {
   /** Файлы фото заявок. */
   photoStorage?: PhotoStorage;
   sessionPerIpPerMin?: number;
-  chatPerMin?: number;
-  /** Вложения чата дома (фото, голосовые, файлы). Нет — загрузка отключена. */
-  chatFiles?: ChatFileStore;
 }
 
 const SessionBody = z.object({ web_app_data: z.string().min(1).max(8192) });
@@ -50,10 +46,8 @@ const LinkBody = z.object({ code: z.string().min(1).max(2048) });
 const RequestId = z.string().regex(/^[A-Za-z0-9-]{1,64}$/);
 const NewRequestBody = z.object({ description: z.string().max(4000), category: z.string().max(32) });
 const SuggestBody = z.object({ description: z.string().max(4000) });
+const SupportBody = z.object({ text: z.string().max(2000) });
 const RatingBody = z.object({ value: z.number().int().min(1).max(5), comment: z.string().max(2000).nullable().optional() });
-const ChatBody = z.object({ text: z.string().max(4000) });
-const NotifyBody = z.object({ on: z.boolean() });
-export const MAX_CHAT_TEXT = 1000;
 export const MAX_RATING_COMMENT = 500;
 const ApartmentBody = z.object({
   house_id: z.string().regex(/^[A-Za-z0-9-]{1,64}$/),
@@ -77,7 +71,7 @@ function orgView(o: OrgInfo | null, withContacts: boolean) {
   };
 }
 
-function apartmentView(a: ApartmentInfo, rating: { avg: number; count: number } | null = null) {
+function apartmentView(a: ApartmentInfo, rating: { avg: number; count: number } | null = null, chat: HouseChatInfo | null = null) {
   const h = a.house;
   return {
     address: formatAddress(h),
@@ -93,32 +87,8 @@ function apartmentView(a: ApartmentInfo, rating: { avg: number; count: number } 
       data_verified: h.verified,
     },
     uk: h.manager ? { ...orgView(h.manager, true)!, rating: rating ? { avg: Math.round(rating.avg * 10) / 10, count: rating.count } : null } : null,
-  };
-}
-
-/**
- * Сообщение чата дома для соседей: имя, ник и фото профиля MAX — без user_id и без квартиры.
- * Вложение — подписанной ссылкой (sign): её можно подставить в <img>/<audio> и открыть в браузере.
- */
-function chatMessageView(m: ChatMessage, sign: (id: string) => string, othersReadAt: Date | null = null) {
-  const a = m.attachment;
-  return {
-    id: m.id,
-    text: m.text,
-    deleted: m.text === null,
-    at: m.createdAt.toISOString(),
-    mine: m.mine,
-    // Своё сообщение: false — одна галочка (отправлено), true — две (прочитал хотя бы один сосед)
-    read: m.mine ? !!othersReadAt && m.createdAt <= othersReadAt : null,
-    author: {
-      key: m.author.key,
-      name: m.author.name ?? 'Сосед',
-      username: m.author.username,
-      photo_url: m.author.photoUrl,
-    },
-    attachment: a
-      ? { kind: a.kind, name: a.name, size: a.size, duration: a.duration, url: `/api/chat/files/${m.id}?t=${sign(m.id)}` }
-      : null,
+    // Чат дома в MAX — только если есть ссылка-приглашение: без неё жильцу некуда перейти
+    house_chat: chat?.link ? { title: chat.title, link: chat.link, since: chat.createdAt.toISOString() } : null,
   };
 }
 
@@ -172,13 +142,9 @@ export function createApiRouter(deps: ApiDeps) {
   const log = deps.logger.child({ module: 'api' });
   const clock = deps.now ?? (() => new Date());
   const userLimiter = new SlidingWindowLimiter(deps.perUserPerMin ?? 60);
-  // Чат: не больше 10 сообщений в минуту от одного жильца — против флуда.
-  const chatLimiter = new SlidingWindowLimiter(deps.chatPerMin ?? 10);
-  const filesKey = fileKey(deps.sessionSecret);
-  const sign = (id: string) => signFile(filesKey, id, clock().getTime());
-  const chatView = (m: ChatMessage, othersReadAt: Date | null = null) => chatMessageView(m, sign, othersReadAt);
+
   const ipLimiter = new SlidingWindowLimiter(deps.sessionPerIpPerMin ?? 30);
-  setInterval(() => (userLimiter.sweep(), ipLimiter.sweep(), chatLimiter.sweep()), 60_000).unref();
+  setInterval(() => (userLimiter.sweep(), ipLimiter.sweep()), 60_000).unref();
 
   const router = express.Router();
 
@@ -249,9 +215,14 @@ export function createApiRouter(deps: ApiDeps) {
     next();
   };
 
+  const fullApartment = async (userId: string, a: ApartmentInfo) => {
+    const [rating, chat] = await Promise.all([deps.store.ukRating(userId), deps.store.houseChat(userId)]);
+    return apartmentView(a, rating, chat);
+  };
+
   router.get('/me', auth, async (_req, res: Response<unknown, Locals>) => {
     const a = await deps.store.getApartment(res.locals.userId);
-    res.json({ apartment: a ? apartmentView(a, await deps.store.ukRating(res.locals.userId)) : null });
+    res.json({ apartment: a ? await fullApartment(res.locals.userId, a) : null });
   });
 
   // ── смена адреса (то же, что «Сменить адрес» в боте) ────────────────────
@@ -301,7 +272,7 @@ export function createApiRouter(deps: ApiDeps) {
     await deps.store.saveApartment(res.locals.userId, { houseId: house.id, number, entrance });
     log.info({ userId: res.locals.userId, house: house.code }, 'api: адрес изменён в мини-приложении');
     const a = await deps.store.getApartment(res.locals.userId);
-    res.json({ apartment: a ? apartmentView(a, await deps.store.ukRating(res.locals.userId)) : null });
+    res.json({ apartment: a ? await fullApartment(res.locals.userId, a) : null });
   });
 
   router.get('/requests', auth, async (_req, res: Response<unknown, Locals>) => {
@@ -328,38 +299,31 @@ export function createApiRouter(deps: ApiDeps) {
     const [own, neighbors, chat] = await Promise.all([
       deps.store.listRequests(res.locals.userId, 50),
       deps.store.houseActivity(res.locals.userId, weekAgo),
-      deps.store.chatView(res.locals.userId, { limit: 30 }),
+      deps.store.houseChat(res.locals.userId),
     ]);
     const items = buildNotifications(own, neighbors, now, !!deps.demoStatuses).map((n) => ({
       id: n.id,
-      kind: n.kind as 'status' | 'neighbors' | 'chat',
+      kind: n.kind as 'status' | 'neighbors' | 'house_chat',
       at: n.at.toISOString(),
       title: n.title,
       text: n.text,
       request_id: n.requestId ?? null,
       category: n.category ?? null,
-      read: false,
+      link: null as string | null,
     }));
-    // Чат дома — в колокольчике, если жилец включил уведомления в чате. Прочитанное в самом чате
-    // (раньше lastReadAt) показываем, но в счётчик новых не включаем.
-    if (chat?.notify) {
-      for (const m of chat.messages) {
-        if (m.mine || m.text === null || m.createdAt < weekAgo) continue;
-        const label = m.attachment ? attachmentLabel({ kind: m.attachment.kind, fileName: m.attachment.name, duration: m.attachment.duration }) : '';
-        const body = m.text.replace(/\s+/g, ' ').trim();
-        const preview = label && body ? `${label}: ${body}` : label || body;
-        items.push({
-          id: `chat:${m.id}`,
-          kind: 'chat',
-          at: m.createdAt.toISOString(),
-          title: 'Чат дома',
-          text: `${m.author.name ?? 'Сосед'}: ${preview.length > 160 ? `${preview.slice(0, 159)}…` : preview}`,
-          request_id: null,
-          category: null,
-          read: !!chat.lastReadAt && m.createdAt <= chat.lastReadAt,
-        });
-      }
-      items.sort((a, b) => b.at.localeCompare(a.at));
+    // Приглашение в чат дома в MAX — одно, пока чат привязан к дому
+    if (chat?.link) {
+      items.push({
+        id: `house_chat:${chat.chatId}`,
+        kind: 'house_chat',
+        at: chat.createdAt.toISOString(),
+        title: 'Чат дома в MAX',
+        text: `У вашего дома есть чат соседей${chat.title ? ` «${chat.title}»` : ''}. Вступите, чтобы быть в курсе отключений и новостей дома.`,
+        request_id: null,
+        category: null,
+        link: chat.link,
+      });
+      items.sort((x, y) => y.at.localeCompare(x.at));
     }
     res.json({ items });
   });
@@ -533,163 +497,31 @@ export function createApiRouter(deps: ApiDeps) {
     res.json(requestView(r!, clock(), !!deps.demoStatuses));
   });
 
-  // ── чат дома ────────────────────────────────────────────────────────────
-  // Участники — жильцы с привязанной квартирой в доме. Соседям видны имя, ник и фото профиля MAX;
-  // user_id MAX и номер квартиры не отдаются никому.
-
-  router.get('/chat', auth, async (req, res: Response<unknown, Locals>) => {
-    const beforeRaw = typeof req.query.before === 'string' ? new Date(req.query.before) : null;
-    const before = beforeRaw && !Number.isNaN(beforeRaw.getTime()) ? beforeRaw : undefined;
-    const [view, apt, chatId] = await Promise.all([
-      deps.store.chatView(res.locals.userId, { limit: 50, before }),
-      deps.store.getApartment(res.locals.userId),
-      deps.store.getChatId(res.locals.userId),
+  // ── чат поддержки: автоответы на типовые вопросы ────────────────────────
+  // Ответ собирается из данных жильца (его УК, заявки, чат дома) — см. src/support/faq.ts.
+  const supportContext = async (userId: string): Promise<SupportContext> => {
+    const [apartment, requests, houseChat] = await Promise.all([
+      deps.store.getApartment(userId),
+      deps.store.listRequests(userId, 50),
+      deps.store.houseChat(userId),
     ]);
-    if (!view || !apt) {
-      res.json({ available: false });
-      return;
-    }
-    // Открыли чат (первая страница) — всё прочитано.
-    if (!before) await deps.store.markChatRead(res.locals.userId, clock());
-    res.json({
-      available: true,
-      address: formatAddress(apt.house),
-      members: view.members,
-      notify: view.notify,
-      // Уведомления приходят сообщением от бота — нужен диалог с ним.
-      can_notify: !!chatId,
-      has_more: view.hasMore,
-      last_read_at: view.lastReadAt?.toISOString() ?? null,
-      max_text: MAX_CHAT_TEXT,
-      messages: view.messages.map((m) => chatView(m, view.othersReadAt)),
-      uploads: !!deps.chatFiles,
-      limits: { photo: CHAT_LIMITS.photo, voice: CHAT_LIMITS.voice, file: CHAT_LIMITS.file, voice_sec: MAX_VOICE_SEC },
-    });
+    return { apartment, requests, houseChat, now: clock(), demo: !!deps.demoStatuses };
+  };
+
+  router.get('/support/start', auth, async (_req, res: Response<unknown, Locals>) => {
+    res.json(greeting(await supportContext(res.locals.userId)));
   });
 
-  router.get('/chat/unread', auth, async (_req, res: Response<unknown, Locals>) => {
-    res.json({ count: await deps.store.chatUnread(res.locals.userId) });
-  });
-
-  router.post('/chat', auth, express.json({ limit: '16kb' }), async (req, res: Response<unknown, Locals>) => {
-    const body = ChatBody.safeParse(req.body);
-    const text = body.success ? cleanChatText(body.data.text) : '';
-    if (!text) {
-      res.status(400).json({ error: 'empty' });
-      return;
-    }
-    if (text.length > MAX_CHAT_TEXT) {
-      res.status(400).json({ error: 'too_long' });
-      return;
-    }
-    if (!chatLimiter.allow(res.locals.userId)) {
-      res.status(429).json({ error: 'too_fast' });
-      return;
-    }
-    const m = await deps.store.postChat(res.locals.userId, { text }, clock());
-    if (!m) {
-      res.status(409).json({ error: 'no_apartment' });
-      return;
-    }
-    res.status(201).json(chatView(m));
-  });
-
-  // Вложение: тело — сами байты (фото мини-приложение сжимает заранее), параметры — в строке запроса:
-  // kind=photo|voice|file, name — имя документа, duration — длительность голосового, caption — подпись.
-  router.post(
-    '/chat/upload',
-    auth,
-    express.raw({ type: () => true, limit: CHAT_LIMITS.file }),
-    async (req, res: Response<unknown, Locals>) => {
-      const q = (k: string) => (typeof req.query[k] === 'string' ? (req.query[k] as string) : '');
-      const kind = q('kind') as ChatKind;
-      if (!deps.chatFiles || !(kind in CHAT_LIMITS)) {
-        res.status(400).json({ error: 'bad_kind' });
-        return;
-      }
-      const buf = Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0);
-      if (buf.length > CHAT_LIMITS[kind]) {
-        res.status(413).json({ error: 'too_big' });
-        return;
-      }
-      const name = cleanFileName(q('name').slice(0, 300));
-      const detected = detectChatFile(kind, buf, name);
-      if (!detected) {
-        res.status(400).json({ error: kind === 'file' ? 'bad_file_type' : 'bad_media' });
-        return;
-      }
-      const caption = cleanChatText(q('caption'));
-      if (caption.length > MAX_CHAT_TEXT) {
-        res.status(400).json({ error: 'too_long' });
-        return;
-      }
-      if (!(await deps.store.getApartment(res.locals.userId))) {
-        res.status(409).json({ error: 'no_apartment' });
-        return;
-      }
-      if (!chatLimiter.allow(res.locals.userId)) {
-        res.status(429).json({ error: 'too_fast' });
-        return;
-      }
-      const id = crypto.randomUUID();
-      const file = await deps.chatFiles.save(buf, id, detected.ext);
-      const duration = kind === 'voice' ? Math.min(MAX_VOICE_SEC, Math.max(0, Math.round(Number(q('duration')) || 0))) : null;
-      const m = await deps.store.postChat(
-        res.locals.userId,
-        { id, text: caption, attachment: { kind, file, name: kind === 'file' ? name : null, size: buf.length, mime: detected.mime, duration } },
-        clock(),
-      );
-      if (!m) {
-        await deps.chatFiles.remove(file);
-        res.status(409).json({ error: 'no_apartment' });
-        return;
-      }
-      log.info({ userId: res.locals.userId, kind, bytes: buf.length }, `api: вложение в чате дома (${kind})`);
-      res.status(201).json(chatView(m));
-    },
-  );
-
-  router.delete('/chat/:id', auth, async (req, res: Response<unknown, Locals>) => {
-    const id = RequestId.safeParse(req.params.id);
-    const r = id.success ? await deps.store.deleteChat(res.locals.userId, id.data, clock()) : { ok: false, file: null };
-    if (r.file) await deps.chatFiles?.remove(r.file);
-    res.status(r.ok ? 200 : 404).json(r.ok ? { ok: true } : { error: 'not_found' });
-  });
-
-  // Файл вложения по подписанной ссылке (без заголовка Authorization: так работают <img>, <audio>
-  // и открытие во внешнем браузере). Документы — только скачиванием, в браузере не открываются.
-  router.get('/chat/files/:id', async (req, res) => {
-    const id = RequestId.safeParse(req.params.id);
-    const t = typeof req.query.t === 'string' ? req.query.t : '';
-    const a = id.success && verifyFile(filesKey, id.data, t, clock().getTime()) ? await deps.store.chatAttachment(id.data) : null;
-    const path_ = a ? deps.chatFiles?.resolve(a.file) : null;
-    if (!a || !path_) {
-      res.status(404).json({ error: 'not_found' });
-      return;
-    }
-    res.set({
-      'Cache-Control': 'private, max-age=3600',
-      'X-Content-Type-Options': 'nosniff',
-      'Content-Security-Policy': "default-src 'none'; sandbox",
-      'Cross-Origin-Resource-Policy': 'same-origin',
-    });
-    if (a.kind === 'file') {
-      const fname = a.name ?? 'файл';
-      const ascii = fname.replace(/[^\x20-\x7e]/g, '_').replace(/["\\]/g, '_');
-      res.set('Content-Disposition', `attachment; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(fname)}`);
-    }
-    res.type(a.mime);
-    res.sendFile(path_);
-  });
-
-  router.put('/chat/notify', auth, express.json({ limit: '1kb' }), async (req, res: Response<unknown, Locals>) => {
-    const body = NotifyBody.safeParse(req.body);
+  router.post('/support', auth, express.json({ limit: '8kb' }), async (req, res: Response<unknown, Locals>) => {
+    const body = SupportBody.safeParse(req.body);
     if (!body.success) {
       res.status(400).json({ error: 'bad_request' });
       return;
     }
-    await deps.store.setChatNotify(res.locals.userId, body.data.on);
-    res.json({ notify: body.data.on });
+    const a = answerQuestion(body.data.text.slice(0, 500), await supportContext(res.locals.userId));
+    // Текст вопроса не логируем — только тему: по ней видно, чего не хватает в базе ответов
+    log.info({ userId: res.locals.userId, topic: a.topic }, `api: поддержка — тема «${a.topic}»`);
+    res.json(a);
   });
 
   router.use((_req, res) => {
