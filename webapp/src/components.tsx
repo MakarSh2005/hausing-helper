@@ -2,13 +2,19 @@ import { useEffect, useState } from 'react';
 import type { Apartment, AppNotification, RequestItem } from './api';
 import { dateTime, phoneHref } from './format';
 
-// ─── шапка: номера аварийных служб и уведомления — две плитки справа вверху ──
+// ─── шапка: название сервиса слева (на стартовых экранах), справа — аварийные номера и уведомления ──
 
-export function Header(props: { apartment: Apartment | null; unread: number; onBell: () => void }) {
+export function Header(props: { apartment: Apartment | null; unread: number; onBell: () => void; showTitle?: boolean }) {
   const [sos, setSos] = useState(false);
   return (
     <>
       <div className="header">
+        {props.showTitle && (
+          <div className="brand">
+            <h1 className="brand__name">Жилищный помощник</h1>
+            <p className="brand__slogan">Реши свою проблему, подав заявку через приложение</p>
+          </div>
+        )}
         <button className="hdr-btn hdr-btn--sos" onClick={() => setSos(true)} aria-label="Номера аварийной службы" title="Номера аварийной службы">
           <svg width="22" height="22" viewBox="0 0 24 24" aria-hidden="true">
             <path

@@ -305,6 +305,7 @@ export function App() {
         apartment={apartment.status === 'ok' ? apartment.value : null}
         unread={route.name === 'notifications' ? 0 : unread}
         onBell={() => route.name !== 'notifications' && go({ name: 'notifications' })}
+        showTitle={!isInner(route)}
       />
       {invite && houseChat && !isInner(route) && (
         <section className="card invite" role="dialog" aria-labelledby="invite-title">
