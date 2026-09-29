@@ -59,12 +59,6 @@ const EnvSchema = z.object({
   /** Демо: напоминание о заявке через N минут вместо нормативного срока (сам срок в заявке не меняется). */
   DEMO_DUE_MINUTES: z.coerce.number().int().min(1).max(1440).optional(),
   DEMO_ADMIN_TOKEN: z.string().min(16).optional(),
-  /** MAX user_id сотрудников, которым разрешено привязывать чаты домов (через запятую). Пусто — любому администратору группы. */
-  HOUSE_CHAT_ADMINS: z
-    .string()
-    .optional()
-    .transform((v) => (v ?? '').split(/[\s,;]+/).filter((x) => /^\d{1,20}$/.test(x))),
-
   /** Лимит вебхука на одного user_id за минуту (ТЗ 9.2). */
   WEBHOOK_RATE_LIMIT_PER_MIN: z.coerce.number().int().positive().default(100),
 });

@@ -74,7 +74,6 @@ async function main() {
     db, max, logger,
     options: {
       demoDueMinutes: config.DEMO_DUE_MINUTES,
-      houseChatAdmins: config.HOUSE_CHAT_ADMINS,
       // Код входа — во фрагменте (#): он не уходит на сервер в строке запроса и не попадает в логи.
       appLink: appBase
         ? (userId, path = '') => `${appBase}/app/${path}#t=${issueSessionToken(userId, appLinkKey, LINK_TTL_SEC)}`
@@ -117,7 +116,6 @@ async function main() {
     sessionTtlSec: config.SESSION_TTL_SECONDS,
     demoStatuses: config.MOCK_AUTO_STATUS_CHANGE,
     photoStorage,
-    offerHouseChat: (userId) => bot.offerHouseChat(userId),
   });
   if (!config.SESSION_JWT_SECRET) logger.info('мини-приложение: ключ сессий производный от токена бота (SESSION_JWT_SECRET не задан)');
   const app = createApp({ db, logger, webhook, botInfo, api, webappDir: config.WEBAPP_DIR });

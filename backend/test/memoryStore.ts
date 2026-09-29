@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import type { ApartmentInfo, BotStore, HouseChatInfo, HouseInfo, RequestInfo, Session, UserProfile } from '../src/bot/store.js';
+import type { ApartmentInfo, BotStore, HouseInfo, RequestInfo, Session, UserProfile } from '../src/bot/store.js';
 import { isValidOrgInn } from '../src/domain/inn.js';
 
 /** Общие для тестов справочник домов (из настоящего файла данных) и in-memory хранилище. */
@@ -49,7 +49,6 @@ export function memoryStore(houses = HOUSES) {
   };
   const users = new Set<string>();
   const profiles = new Map<string, UserProfile>();
-  const houseChats: HouseChatInfo[] = [];
   const store: BotStore = {
     ensureUser: async (u, p = {}) => {
       users.add(u);
@@ -131,23 +130,6 @@ export function memoryStore(houses = HOUSES) {
       const rated = requests.filter((r) => mine?.house.manager && r.org === mine.house.manager && r.rating);
       return rated.length ? { avg: rated.reduce((s, r) => s + r.rating!.value, 0) / rated.length, count: rated.length } : null;
     },
-    houseChat: async (u) => {
-      const a = apartments.get(u);
-      return (a && houseChats.find((c) => c.houseId === a.houseId)) || null;
-    },
-    houseResidents: async (houseId) => [...apartments.entries()].filter(([, a]) => a.houseId === houseId).map(([u]) => ({ maxUserId: u, chatId: `dlg-${u}` })),
-    houseChatByHouse: async (houseId) => houseChats.find((c) => c.houseId === houseId) ?? null,
-    houseChatByChat: async (chatId) => houseChats.find((c) => c.chatId === chatId) ?? null,
-    bindHouseChat: async (c) => {
-      for (let i = houseChats.length - 1; i >= 0; i--) if (houseChats[i]!.chatId === c.chatId || houseChats[i]!.houseId === c.houseId) houseChats.splice(i, 1);
-      houseChats.push({ houseId: c.houseId, chatId: c.chatId, title: c.title, link: c.link, createdAt: new Date(clock.now) });
-    },
-    unbindHouseChat: async (chatId) => {
-      const i = houseChats.findIndex((c) => c.chatId === chatId);
-      if (i < 0) return false;
-      houseChats.splice(i, 1);
-      return true;
-    },
     markReminded: async (id, at) => {
       const r = requests.find((x) => x.id === id);
       if (!r || r.reminderSentAt) return false;
@@ -155,7 +137,7 @@ export function memoryStore(houses = HOUSES) {
       return true;
     },
   };
-  return Object.assign(store, { apartments, requests, users, profiles, houseChats });
+  return Object.assign(store, { apartments, requests, users, profiles });
 }
 
 /** Управляемые часы: 24.09.2026 12:00 МСК (четверг). */

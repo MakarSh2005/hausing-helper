@@ -1,4 +1,4 @@
-import type { ApartmentInfo, HouseChatInfo, RequestInfo } from '../bot/store.js';
+import type { ApartmentInfo, RequestInfo } from '../bot/store.js';
 import { formatAddress } from '../domain/address.js';
 import { detectCategory } from '../domain/category.js';
 import type { RequestCategory } from '../domain/enums.js';
@@ -8,7 +8,7 @@ import { effectiveStatus, OPEN_STATUSES, STATUS_LABEL } from '../domain/requestS
 /**
  * Чат поддержки в мини-приложении: ответы на типовые вопросы жильца без LLM.
  * Вопрос сопоставляется с темами по ключевым словам; ответ собирается из данных самого жильца
- * (его УК и её телефоны, сроки по нормативам, его заявки, чат дома). Если тему не узнали, но в вопросе
+ * (его УК и её телефоны, сроки по нормативам, его заявки). Если тему не узнали, но в вопросе
  * описана проблема («течёт батарея») — отвечаем про эту категорию и предлагаем подать заявку.
  * Телефоны — только из проверенных данных, как и везде в сервисе.
  */
@@ -18,7 +18,6 @@ export type SupportAction =
   | { type: 'open_request'; label: string; id: string }
   | { type: 'address'; label: string }
   | { type: 'call'; label: string; phone: string }
-  | { type: 'link'; label: string; url: string }
   | { type: 'tab'; label: string; tab: 'apartment' | 'requests' | 'notifications' };
 
 export interface SupportAnswer {
@@ -32,7 +31,6 @@ export interface SupportAnswer {
 export interface SupportContext {
   apartment: ApartmentInfo | null;
   requests: RequestInfo[];
-  houseChat: HouseChatInfo | null;
   now: Date;
   demo: boolean;
 }
@@ -76,7 +74,6 @@ const S = {
   uk: 'Как связаться с УК?',
   emergency: 'Авария — что делать?',
   address: 'Как сменить адрес?',
-  chat: 'Есть ли чат дома?',
   privacy: 'Кто видит мои данные?',
   payments: 'Как передать показания счётчиков?',
 };
@@ -281,7 +278,7 @@ const TOPICS: Topic[] = [
         'Если вашего дома нет в справочнике — сервис пока работает с домами четырёх районов Казани, справочник будет пополняться.',
       ].join('\n'),
       actions: [{ type: 'address', label: ctx.apartment ? 'Сменить адрес' : 'Указать адрес' }],
-      suggestions: [S.uk, S.chat],
+      suggestions: [S.uk, S.submit],
     }),
   },
   {
@@ -323,27 +320,6 @@ const TOPICS: Topic[] = [
       actions: [{ type: 'tab', label: 'Открыть уведомления', tab: 'notifications' }],
       suggestions: [S.status],
     }),
-  },
-  {
-    id: 'chat',
-    patterns: [/чат/, /сосед/, /групп/, /вступить/],
-    answer: (ctx) => {
-      const hc = ctx.houseChat;
-      if (hc?.link) {
-        return {
-          topic: 'chat',
-          text: `У вашего дома есть чат соседей в MAX${hc.title ? ` — «${hc.title}»` : ''}. Там обсуждают отключения, собрания и новости дома. Ссылка всегда есть на вкладке «Квартира».`,
-          actions: [{ type: 'link', label: 'Вступить в чат дома', url: hc.link }],
-          suggestions: [S.address, S.privacy],
-        };
-      }
-      return {
-        topic: 'chat',
-        text: 'Чата вашего дома в MAX пока нет. Чаты домов подключаются постепенно — как только чат вашего дома появится, бот сам пришлёт вам приглашение, а в приложении появится кнопка «Вступить в чат».',
-        actions: [],
-        suggestions: [S.submit, S.privacy],
-      };
-    },
   },
   {
     id: 'privacy',
@@ -393,7 +369,7 @@ const TOPICS: Topic[] = [
         '• подать заявку с фото за минуту',
         '• знать срок по нормативу и следить за ним с таймером',
         '• получить напоминание, когда срок истёк, и готовую жалобу в Госжилинспекцию',
-        '• видеть, о чём уже сообщили соседи, и найти чат дома',
+        '• видеть, о чём уже сообщили соседи по дому',
         '• найти контакты своей управляющей компании',
         '',
         'Спросите меня о сроках, заявках, УК или аварии — отвечу.',
@@ -423,7 +399,7 @@ export function greeting(ctx: SupportContext): SupportAnswer {
       'Выберите вопрос ниже или напишите свой.',
     ].join('\n'),
     actions: noAddress(ctx),
-    suggestions: [S.submit, S.deadline, S.status, S.uk, S.emergency, S.chat],
+    suggestions: [S.submit, S.deadline, S.status, S.uk, S.emergency, S.payments],
   };
 }
 

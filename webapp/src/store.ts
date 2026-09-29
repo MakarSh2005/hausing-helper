@@ -50,27 +50,8 @@ export const notifSeen = {
   set: (t: number) => set(SEEN, String(t)),
 };
 
-/** Ответ на приглашение в чат дома в MAX — по ссылке: новый чат дома предложим заново. */
-export const houseChatPrompt = {
-  get(link: string): 'joined' | 'declined' | null {
-    try {
-      const v = localStorage.getItem(`hh.houseChat.${link}`);
-      return v === 'joined' || v === 'declined' ? v : null;
-    } catch {
-      return null;
-    }
-  },
-  set(link: string, v: 'joined' | 'declined') {
-    try {
-      localStorage.setItem(`hh.houseChat.${link}`, v);
-    } catch {
-      /* хранилище недоступно — спросим ещё раз в следующий раз */
-    }
-  },
-};
-
 type SupportItem = { from: 'user' | 'bot'; text: string; actions?: unknown[]; suggestions?: string[] };
-const SUPPORT_KEY = 'hh.support.v1';
+const SUPPORT_KEY = 'hh.support.v2';
 /** История чата поддержки на устройстве: последние 40 сообщений, сутки. */
 export const supportHistory = {
   load<T extends SupportItem>(): T[] {

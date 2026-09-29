@@ -99,21 +99,6 @@ export class MaxClient {
     return this.enqueue(queueKey, () => this.request('POST', '/messages', { query, body }));
   }
 
-  /** GET /chats/{chatId} — групповой чат: название, владелец, ссылка-приглашение. */
-  getChat(chatId: string): Promise<{ chat_id: number; type: string; title?: string | null; link?: string | null; owner_id?: number | null }> {
-    return this.request('GET', `/chats/${encodeURIComponent(chatId)}`);
-  }
-
-  /** GET /chats/{chatId}/members/admins — администраторы (бот должен быть участником). */
-  getChatAdmins(chatId: string): Promise<{ members: Array<{ user_id: number | string }> }> {
-    return this.request('GET', `/chats/${encodeURIComponent(chatId)}/members/admins`);
-  }
-
-  /** DELETE /chats/{chatId}/members/me — бот выходит из чата. */
-  leaveChat(chatId: string): Promise<unknown> {
-    return this.request('DELETE', `/chats/${encodeURIComponent(chatId)}/members/me`);
-  }
-
   /** POST /answers?callback_id=… — ответ на нажатие inline-кнопки. */
   async answerCallback(callbackId: string, answer: CallbackAnswer): Promise<unknown> {
     const res = await this.request('POST', '/answers', { query: { callback_id: callbackId }, body: answer });

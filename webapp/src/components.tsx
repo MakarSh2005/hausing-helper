@@ -167,13 +167,12 @@ export function Notifications(props: {
   seenBefore: number;
   onOpenRequest: (id: string) => void;
   onJoin: (category: string) => void;
-  onJoinChat: (link: string) => void;
 }) {
   if (props.items.length === 0) {
     return (
       <div className="state" style={{ minHeight: '50dvh', background: 'transparent' }}>
         <h1>Уведомлений пока нет</h1>
-        <p>Здесь появятся новые статусы ваших заявок, то, о чём уже сообщили соседи, и приглашение в чат дома в MAX.</p>
+        <p>Здесь появятся новые статусы ваших заявок и то, о чём уже сообщили соседи по дому.</p>
       </div>
     );
   }
@@ -182,7 +181,7 @@ export function Notifications(props: {
       {props.items.map((n) => {
         const fresh = new Date(n.at).getTime() > props.seenBefore;
         return (
-          <section key={n.id} className={`card notif${fresh ? ' notif--new' : ''}${n.kind === 'neighbors' ? ' notif--neighbors' : ''}${n.kind === 'house_chat' ? ' notif--chat' : ''}`}>
+          <section key={n.id} className={`card notif${fresh ? ' notif--new' : ''}${n.kind === 'neighbors' ? ' notif--neighbors' : ''}`}>
             <span className="field__label">
               {n.title} · {dateTime(n.at)}
             </span>
@@ -190,11 +189,6 @@ export function Notifications(props: {
             {n.kind === 'status' && n.request_id && (
               <button className="linkish notif__action" onClick={() => props.onOpenRequest(n.request_id!)}>
                 Открыть заявку
-              </button>
-            )}
-            {n.kind === 'house_chat' && n.link && (
-              <button className="linkish notif__action" onClick={() => props.onJoinChat(n.link!)}>
-                Вступить в чат
               </button>
             )}
             {n.kind === 'neighbors' && n.category && (

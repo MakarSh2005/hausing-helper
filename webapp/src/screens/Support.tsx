@@ -1,12 +1,12 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { api, AuthError, type SupportAction, type SupportAnswer } from '../api';
-import { openMaxUrl, tap } from '../bridge';
+import { tap } from '../bridge';
 import { phoneHref } from '../format';
 import { supportHistory } from '../store';
 
 /**
  * Чат поддержки: автоответы на типовые вопросы (сервер — backend/src/support/faq.ts).
- * Ответы собираются из данных жильца: его УК, заявки, сроки по нормативам, чат дома.
+ * Ответы собираются из данных жильца: его УК, заявки, сроки по нормативам.
  * Под ответом — кнопки действий (подать заявку, открыть заявку, позвонить) и подсказки-вопросы.
  */
 
@@ -89,8 +89,6 @@ export function Support(props: SupportHandlers) {
       case 'call':
         window.location.href = phoneHref(a.phone);
         return;
-      case 'link':
-        return openMaxUrl(a.url);
 
     }
   }

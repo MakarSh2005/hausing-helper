@@ -78,17 +78,8 @@ describe('parseUpdate', () => {
     assert.deepEqual(r.event.attachments, [{ type: 'image', payload: { token: 't' } }]);
   });
 
-  it('bot_added / bot_removed в групповом чате → added / removed; канал — игнорируется', () => {
-    const r = parseUpdate({ update_type: 'bot_added', timestamp: 5, chat_id: -100, user: { user_id: 7, name: 'Админ' }, is_channel: false });
-    assert.ok(r.ok);
-    assert.deepEqual([r.event.type, r.event.chatId, r.event.chatType, r.event.userId, r.event.dedupKey], ['added', '-100', 'chat', '7', 'added:-100:5']);
-    const rm = parseUpdate({ update_type: 'bot_removed', timestamp: 6, chat_id: -100, user: { user_id: 7 } });
-    assert.ok(rm.ok && rm.event.type === 'removed');
-    assert.deepEqual(parseUpdate({ update_type: 'bot_added', timestamp: 5, chat_id: -1, user: { user_id: 7 }, is_channel: true }), { ok: false, reason: 'ignored', updateType: 'bot_added' });
-  });
-
   it('ненужные типы игнорируются', () => {
-    for (const t of ['message_edited', 'user_added', 'chat_title_changed']) {
+    for (const t of ['bot_added', 'message_edited', 'user_added', 'message_chat_created']) {
       const r = parseUpdate({ update_type: t, timestamp: 1 });
       assert.deepEqual(r, { ok: false, reason: 'ignored', updateType: t });
     }

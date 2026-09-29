@@ -317,24 +317,6 @@ describe('API мини-приложения', () => {
     clock.now -= 60_000;
   });
 
-  it('чат дома в MAX: ссылка в /me и приглашение в уведомлениях — только жильцам этого дома и только со ссылкой', async () => {
-    const [A, B] = ['75001', '75002'];
-    store.apartments.set(A, { houseId: HOUSES[4]!.id, number: '1', entrance: null });
-    store.apartments.set(B, { houseId: HOUSES[5]!.id, number: '1', entrance: null });
-    type Me = { apartment: { house_chat: { title: string | null; link: string; since: string } | null } };
-    const me = async (u: string) => ((await (await call('/api/me', { token: tokenFor(u) })).json()) as Me).apartment.house_chat;
-    const invites = async (u: string) =>
-      ((await (await call('/api/notifications', { token: tokenFor(u) })).json()) as { items: Array<{ kind: string; link: string | null }> }).items.filter((n) => n.kind === 'house_chat');
-    assert.equal(await me(A), null);
-    await store.bindHouseChat({ houseId: HOUSES[4]!.id, chatId: '-1', title: 'Соседи', link: null, boundBy: '1' });
-    assert.equal(await me(A), null, 'без ссылки приглашать некуда');
-    await store.bindHouseChat({ houseId: HOUSES[4]!.id, chatId: '-1', title: 'Соседи', link: 'https://max.ru/join/q', boundBy: '1' });
-    assert.deepEqual(await me(A), { title: 'Соседи', link: 'https://max.ru/join/q', since: (await me(A))!.since });
-    assert.deepEqual((await invites(A)).map((n) => n.link), ['https://max.ru/join/q']);
-    assert.equal(await me(B), null, 'другой дом');
-    assert.equal((await invites(B)).length, 0);
-  });
-
   it('чат поддержки: приветствие и ответ по данным жильца; без токена — 401', async () => {
     const U = '76001';
     store.apartments.set(U, { houseId: HOUSES[0]!.id, number: '7', entrance: null });

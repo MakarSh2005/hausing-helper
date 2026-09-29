@@ -692,12 +692,6 @@ body {
   line-height: 1.35;
   white-space: pre-wrap;
 }
-.msg__time {
-  font-size: 11px;
-  text-align: right;
-  opacity: 0.65;
-  margin-top: 2px;
-}
 .composer {
   position: fixed;
   left: 0;
@@ -824,47 +818,6 @@ body {
   }
 }
 
-/* ─── приглашение в чат дома в MAX ───────────────────────────────────── */
-.invite {
-  border: 1px solid var(--text-themed);
-  margin-bottom: 12px;
-}
-.invite__head {
-  display: flex;
-  gap: 12px;
-  align-items: flex-start;
-}
-.invite__icon {
-  flex: none;
-  width: 40px;
-  height: 40px;
-  border-radius: 12px;
-  display: grid;
-  place-items: center;
-  background: var(--text-themed);
-  color: #fff;
-}
-.invite__actions {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 8px;
-  margin-top: 12px;
-}
-.invite__btn {
-  padding: 10px;
-  border: 0;
-  border-radius: 12px;
-  background: var(--background-tertiary);
-  color: var(--text-primary);
-  font: inherit;
-  font-weight: 600;
-  cursor: pointer;
-}
-.invite__btn--primary {
-  background: var(--text-themed);
-  color: #fff;
-}
-.invite__btn:focus-visible,
 .support-action:focus-visible {
   outline: 2px solid var(--text-themed);
   outline-offset: 2px;

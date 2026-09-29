@@ -123,7 +123,6 @@ model House {
   tariffs         Tariff[]
   capRepairWorks  CapitalRepairWork[]
   requests        Request[]
-  chat            HouseChat?
 
   @@index([city, street])
   @@index([managerId])
@@ -250,28 +249,6 @@ model RequestCounter {
   value Int @default(0)
 
   @@map("request_counters")
-}
-
-// ─── Чат дома в MAX ──────────────────────────────────────────────────────────
-
-/// Групповой чат дома в MAX. API MAX не даёт боту создавать чаты и добавлять участников,
-/// поэтому чат создаёт человек и добавляет бота администратором, а бот привязывает его к дому
-/// командой «/дом <адрес>». Жильцы получают ссылку-приглашение в мини-приложении.
-model HouseChat {
-  id               String   @id @default(uuid())
-  houseId          String   @unique
-  /// chat_id группового чата в MAX
-  chatId           String   @unique
-  title            String?
-  /// Ссылка-приглашение (поле link чата или присланная командой)
-  link             String?
-  boundByMaxUserId String
-  createdAt        DateTime @default(now())
-  updatedAt        DateTime @updatedAt
-
-  house House @relation(fields: [houseId], references: [id], onDelete: Cascade)
-
-  @@map("house_chats")
 }
 
 // ─── Служебные таблицы бота ──────────────────────────────────────────────────

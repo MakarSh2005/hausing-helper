@@ -9,7 +9,6 @@ const house = HOUSES.find((h) => h.manager?.verified) ?? HOUSES[0]!;
 const ctx = (over: Partial<SupportContext> = {}): SupportContext => ({
   apartment: { number: '42', entrance: 2, house },
   requests: [],
-  houseChat: null,
   now,
   demo: false,
   ...over,
@@ -35,7 +34,6 @@ describe('чат поддержки: типовые вопросы', () => {
     ['Как отменить заявку', 'cancel'],
     ['можно прикрепить фото?', 'photos'],
     ['как оценить работу', 'rating'],
-    ['Есть ли чат дома?', 'chat'],
     ['Кто видит мои данные?', 'privacy'],
     ['Как передать показания счётчиков?', 'payments'],
     ['где квитанция за ЖКУ', 'payments'],
@@ -65,13 +63,6 @@ describe('чат поддержки: типовые вопросы', () => {
     assert.match(st.text, /REQ-2026-00007, Лифт: зарегистрирована — срок истёк/);
     assert.deepEqual(st.actions[0], { type: 'open_request', label: 'Открыть REQ-2026-00007', id: 'r1' });
     assert.match(answerQuestion('срок прошел', ctx({ requests: [r] })).text, /Просроченных заявок у вас: 1/);
-
-    const chat = answerQuestion('чат соседей', ctx({ houseChat: { houseId: house.id, chatId: '-1', title: 'Баумана 15', link: 'https://max.ru/join/x', createdAt: now } }));
-    assert.deepEqual(chat.actions, [{ type: 'link', label: 'Вступить в чат дома', url: 'https://max.ru/join/x' }]);
-    const none = answerQuestion('чат соседей', ctx());
-    assert.match(none.text, /бот сам пришлёт вам приглашение/);
-    assert.deepEqual(none.actions, []);
-    assert.doesNotMatch(none.text, /создайте|\/дом/i, 'жильцу не предлагаем создавать чат');
 
     const noApt = greeting(ctx({ apartment: null }));
     assert.deepEqual(noApt.actions, [{ type: 'address', label: 'Указать адрес' }]);

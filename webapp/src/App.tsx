@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useState } from 'react';
 import { api, AuthError, login, NetworkError, type Apartment as Apt, type AppNotification, type Catalog, type RequestItem } from './api';
 import { Header, Notifications } from './components';
-import { houseChatPrompt, notifSeen } from './store';
-import { insideMax, openBotChat, openMaxUrl, startParam, tap, webApp } from './bridge';
+import { notifSeen } from './store';
+import { insideMax, openBotChat, startParam, tap, webApp } from './bridge';
 import { Apartment } from './screens/Apartment';
 import { ChangeAddress } from './screens/ChangeAddress';
 import { Support } from './screens/Support';
@@ -66,8 +66,6 @@ export function App() {
   /** Граница «новых» на экране уведомлений — до того, как отметили их просмотренными. */
   const [seenBefore, setSeenBefore] = useState(0);
   const [newCategory, setNewCategory] = useState<string | null>(null);
-  /** Приглашение в чат дома в MAX показано и ещё без ответа (ключ — ссылка). */
-  const [invite, setInvite] = useState<string | null>(null);
 
   const fail = useCallback((err: unknown, set: (d: Data<never>) => void) => {
     if (err instanceof AuthError) setPhase({ kind: 'auth_error', problem: err.problem });
@@ -117,34 +115,17 @@ export function App() {
       document.removeEventListener('visibilitychange', onVisible);
     };
   }, [phase.kind, loadNotifs]);
+  // Открыли уведомления — всё просмотрено. Только после входа: иначе запрос уходит без токена.
   useEffect(() => {
-    if (route.name !== 'notifications') return;
+    if (route.name !== 'notifications' || phase.kind !== 'ready') return;
     setSeenBefore(seen);
     const now = Date.now();
     notifSeen.set(now);
     setSeen(now);
     loadNotifs();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [route.name]);
+  }, [route.name, phase.kind]);
   const unread = notifs.filter((n) => new Date(n.at).getTime() > seen).length;
-
-  // Чат дома в MAX: при первом открытии — приглашение вступить, пока жилец не ответил «Вступить» или «Не сейчас».
-  // Ключ ответа — ссылка чата: новый чат дома предложим заново.
-  const houseChat = apartment.status === 'ok' ? apartment.value?.house_chat ?? null : null;
-  useEffect(() => {
-    setInvite(houseChat && !houseChatPrompt.get(houseChat.link) ? houseChat.link : null);
-  }, [houseChat?.link]); // eslint-disable-line react-hooks/exhaustive-deps
-  const joinHouseChat = (link: string) => {
-    houseChatPrompt.set(link, 'joined');
-    setInvite(null);
-    tap();
-    openMaxUrl(link);
-  };
-  const declineHouseChat = (link: string) => {
-    houseChatPrompt.set(link, 'declined');
-    setInvite(null);
-    setBanner({ text: 'Ссылка на чат дома всегда есть на вкладке «Квартира».' });
-  };
 
   // Данные под текущий экран
   useEffect(() => {
@@ -307,33 +288,6 @@ export function App() {
         onBell={() => route.name !== 'notifications' && go({ name: 'notifications' })}
         showTitle={!isInner(route)}
       />
-      {invite && houseChat && !isInner(route) && (
-        <section className="card invite" role="dialog" aria-labelledby="invite-title">
-          <div className="invite__head">
-            <span className="invite__icon" aria-hidden="true">
-              <svg width="22" height="22" viewBox="0 0 24 24">
-                <path d="M9 11a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7Zm7 0a3 3 0 1 0 0-6 3 3 0 0 0 0 6ZM2 19c0-3 3.1-5.5 7-5.5s7 2.5 7 5.5v1H2v-1Zm15.5 1v-1c0-1.9-.8-3.5-2.1-4.7.5-.1 1-.1 1.6-.1 3.3 0 5.9 2 5.9 4.6V20h-5.4Z" fill="currentColor" />
-              </svg>
-            </span>
-            <div>
-              <div id="invite-title" className="field__value" style={{ fontWeight: 600 }}>
-                У вашего дома есть чат в MAX
-              </div>
-              <span className="field__label">
-                {houseChat.title ? `«${houseChat.title}» — ` : ''}соседи обсуждают отключения, собрания и новости дома.
-              </span>
-            </div>
-          </div>
-          <div className="invite__actions">
-            <button className="invite__btn invite__btn--primary" onClick={() => joinHouseChat(houseChat.link)}>
-              Вступить в чат
-            </button>
-            <button className="invite__btn" onClick={() => declineHouseChat(houseChat.link)}>
-              Не сейчас
-            </button>
-          </div>
-        </section>
-      )}
       {!isInner(route) && (
         <div className="tabs" role="tablist" aria-label="Разделы">
           <button className="tab" role="tab" aria-selected={route.name === 'apartment'} onClick={() => onTab('apartment')}>
@@ -371,7 +325,6 @@ export function App() {
           seenBefore={seenBefore}
           onOpenRequest={(id) => go({ name: 'request', id })}
           onJoin={(category) => openNew(category)}
-          onJoinChat={joinHouseChat}
         />
       )}
       {banner && (route.name === 'request' || route.name === 'apartment' || route.name === 'requests') && (
@@ -432,7 +385,7 @@ export function App() {
       )}
       {route.name === 'apartment' && (
         <DataView data={apartment} retry={loadApartment}>
-          {(a) => <Apartment apartment={a} onChangeAddress={() => go({ name: 'address' })} onJoinChat={joinHouseChat} />}
+          {(a) => <Apartment apartment={a} onChangeAddress={() => go({ name: 'address' })} />}
         </DataView>
       )}
       {route.name === 'support' && (

@@ -3,7 +3,7 @@ import type { Logger } from 'pino';
 import { z } from 'zod';
 import { issueSessionToken, linkSecret, verifySessionToken } from '../auth/sessionToken.js';
 import { validateWebAppData } from '../auth/webAppData.js';
-import type { ApartmentInfo, BotStore, HouseChatInfo, OrgInfo, RequestInfo } from '../bot/store.js';
+import type { ApartmentInfo, BotStore, OrgInfo, RequestInfo } from '../bot/store.js';
 import { formatAddress, matchHouse } from '../domain/address.js';
 import { parseApartmentNumber } from '../bot/bot.js';
 import { complaintText } from '../domain/complaint.js';
@@ -39,8 +39,6 @@ export interface ApiDeps {
   /** Файлы фото заявок. */
   photoStorage?: PhotoStorage;
   sessionPerIpPerMin?: number;
-  /** Бот присылает жильцу в диалог приглашение в чат его дома (если чат есть). */
-  offerHouseChat?: (maxUserId: string) => Promise<string>;
 }
 
 const SessionBody = z.object({ web_app_data: z.string().min(1).max(8192) });
@@ -73,7 +71,7 @@ function orgView(o: OrgInfo | null, withContacts: boolean) {
   };
 }
 
-function apartmentView(a: ApartmentInfo, rating: { avg: number; count: number } | null = null, chat: HouseChatInfo | null = null) {
+function apartmentView(a: ApartmentInfo, rating: { avg: number; count: number } | null = null) {
   const h = a.house;
   return {
     address: formatAddress(h),
@@ -89,8 +87,6 @@ function apartmentView(a: ApartmentInfo, rating: { avg: number; count: number } 
       data_verified: h.verified,
     },
     uk: h.manager ? { ...orgView(h.manager, true)!, rating: rating ? { avg: Math.round(rating.avg * 10) / 10, count: rating.count } : null } : null,
-    // Чат дома в MAX — только если есть ссылка-приглашение: без неё жильцу некуда перейти
-    house_chat: chat?.link ? { title: chat.title, link: chat.link, since: chat.createdAt.toISOString() } : null,
   };
 }
 
@@ -218,8 +214,7 @@ export function createApiRouter(deps: ApiDeps) {
   };
 
   const fullApartment = async (userId: string, a: ApartmentInfo) => {
-    const [rating, chat] = await Promise.all([deps.store.ukRating(userId), deps.store.houseChat(userId)]);
-    return apartmentView(a, rating, chat);
+    return apartmentView(a, await deps.store.ukRating(userId));
   };
 
   router.get('/me', auth, async (_req, res: Response<unknown, Locals>) => {
@@ -273,8 +268,6 @@ export function createApiRouter(deps: ApiDeps) {
     await deps.store.ensureUser(res.locals.userId);
     await deps.store.saveApartment(res.locals.userId, { houseId: house.id, number, entrance });
     log.info({ userId: res.locals.userId, house: house.code }, 'api: адрес изменён в мини-приложении');
-    // Как и после привязки в боте — бот присылает приглашение в чат нового дома, если он есть
-    void deps.offerHouseChat?.(res.locals.userId).catch((err) => log.warn(`api: не удалось предложить чат дома — ${(err as Error).message}`));
     const a = await deps.store.getApartment(res.locals.userId);
     res.json({ apartment: a ? await fullApartment(res.locals.userId, a) : null });
   });
@@ -300,35 +293,19 @@ export function createApiRouter(deps: ApiDeps) {
   router.get('/notifications', auth, async (_req, res: Response<unknown, Locals>) => {
     const now = clock();
     const weekAgo = new Date(now.getTime() - 7 * 86_400_000);
-    const [own, neighbors, chat] = await Promise.all([
+    const [own, neighbors] = await Promise.all([
       deps.store.listRequests(res.locals.userId, 50),
       deps.store.houseActivity(res.locals.userId, weekAgo),
-      deps.store.houseChat(res.locals.userId),
     ]);
     const items = buildNotifications(own, neighbors, now, !!deps.demoStatuses).map((n) => ({
       id: n.id,
-      kind: n.kind as 'status' | 'neighbors' | 'house_chat',
+      kind: n.kind,
       at: n.at.toISOString(),
       title: n.title,
       text: n.text,
       request_id: n.requestId ?? null,
       category: n.category ?? null,
-      link: null as string | null,
     }));
-    // Приглашение в чат дома в MAX — одно, пока чат привязан к дому
-    if (chat?.link) {
-      items.push({
-        id: `house_chat:${chat.chatId}`,
-        kind: 'house_chat',
-        at: chat.createdAt.toISOString(),
-        title: 'Чат дома в MAX',
-        text: `У вашего дома есть чат соседей${chat.title ? ` «${chat.title}»` : ''}. Вступите, чтобы быть в курсе отключений и новостей дома.`,
-        request_id: null,
-        category: null,
-        link: chat.link,
-      });
-      items.sort((x, y) => y.at.localeCompare(x.at));
-    }
     res.json({ items });
   });
 
@@ -504,12 +481,8 @@ export function createApiRouter(deps: ApiDeps) {
   // ── чат поддержки: автоответы на типовые вопросы ────────────────────────
   // Ответ собирается из данных жильца (его УК, заявки, чат дома) — см. src/support/faq.ts.
   const supportContext = async (userId: string): Promise<SupportContext> => {
-    const [apartment, requests, houseChat] = await Promise.all([
-      deps.store.getApartment(userId),
-      deps.store.listRequests(userId, 50),
-      deps.store.houseChat(userId),
-    ]);
-    return { apartment, requests, houseChat, now: clock(), demo: !!deps.demoStatuses };
+    const [apartment, requests] = await Promise.all([deps.store.getApartment(userId), deps.store.listRequests(userId, 50)]);
+    return { apartment, requests, now: clock(), demo: !!deps.demoStatuses };
   };
 
   router.get('/support/start', auth, async (_req, res: Response<unknown, Locals>) => {

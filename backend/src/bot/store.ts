@@ -92,16 +92,6 @@ export interface UserProfile {
   photoUrl?: string;
 }
 
-/** Чат дома в MAX: групповой чат, привязанный к дому (создаёт человек, бот привязывает командой /дом). */
-export interface HouseChatInfo {
-  houseId: string;
-  chatId: string;
-  title: string | null;
-  /** Ссылка-приглашение в чат; null — бот её не получил. */
-  link: string | null;
-  createdAt: Date;
-}
-
 export interface NewRequest {
   /** Снимок адреса квартиры на момент подачи. */
   address: string;
@@ -166,15 +156,6 @@ export interface BotStore {
   /** Средняя оценка УК текущего дома жильца по всем оценённым заявкам; null — оценок нет. */
   ukRating(maxUserId: string): Promise<{ avg: number; count: number } | null>;
 
-  /** Чат дома в MAX для дома жильца; null — квартира не привязана или чата нет. */
-  houseChat(maxUserId: string): Promise<HouseChatInfo | null>;
-  houseChatByChat(chatId: string): Promise<HouseChatInfo | null>;
-  houseChatByHouse(houseId: string): Promise<HouseChatInfo | null>;
-  /** Жильцы дома и их диалоги с ботом — для рассылки приглашения в чат дома. */
-  houseResidents(houseId: string): Promise<Array<{ maxUserId: string; chatId: string | null }>>;
-  /** Привязать групповой чат к дому. Один чат — один дом; у дома — один чат (новый заменяет старый). */
-  bindHouseChat(c: { houseId: string; chatId: string; title: string | null; link: string | null; boundBy: string }): Promise<void>;
-  unbindHouseChat(chatId: string): Promise<boolean>;
 }
 
 export const IDLE: Session = { state: 'idle', data: {} };
@@ -446,38 +427,5 @@ export function createPrismaStore(db: Db, opts: { cacheMs?: number } = {}): BotS
       return agg._count.rating ? { avg: agg._avg.rating ?? 0, count: agg._count.rating } : null;
     },
 
-    async houseChat(maxUserId) {
-      const apt = await db.apartment.findUnique({ where: { userId: await userId(maxUserId) }, select: { houseId: true } });
-      if (!apt) return null;
-      const c = await db.houseChat.findUnique({ where: { houseId: apt.houseId } });
-      return c ? toHouseChat(c) : null;
-    },
-    async houseChatByHouse(houseId) {
-      const c = await db.houseChat.findUnique({ where: { houseId } });
-      return c ? toHouseChat(c) : null;
-    },
-    async houseResidents(houseId) {
-      const rows = await db.apartment.findMany({ where: { houseId }, select: { user: { select: { maxUserId: true, maxChatId: true } } }, take: 2000 });
-      return rows.map((r) => ({ maxUserId: r.user.maxUserId, chatId: r.user.maxChatId }));
-    },
-    async houseChatByChat(chatId) {
-      const c = await db.houseChat.findUnique({ where: { chatId } });
-      return c ? toHouseChat(c) : null;
-    },
-    async bindHouseChat(c) {
-      await db.$transaction([
-        // Чат переезжает к другому дому или у дома новый чат — старые привязки убираем
-        db.houseChat.deleteMany({ where: { OR: [{ chatId: c.chatId }, { houseId: c.houseId }] } }),
-        db.houseChat.create({ data: { houseId: c.houseId, chatId: c.chatId, title: c.title, link: c.link, boundByMaxUserId: c.boundBy } }),
-      ]);
-    },
-    async unbindHouseChat(chatId) {
-      const r = await db.houseChat.deleteMany({ where: { chatId } });
-      return r.count > 0;
-    },
   };
-}
-
-function toHouseChat(c: { houseId: string; chatId: string; title: string | null; link: string | null; createdAt: Date }): HouseChatInfo {
-  return { houseId: c.houseId, chatId: c.chatId, title: c.title, link: c.link, createdAt: c.createdAt };
 }

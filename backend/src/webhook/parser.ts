@@ -48,14 +48,6 @@ const BotStartedSchema = z.object({
   payload: z.string().max(128).nullish(),
 });
 
-const BotMembershipSchema = z.object({
-  update_type: z.enum(['bot_added', 'bot_removed']),
-  timestamp: z.number(),
-  chat_id: Id,
-  user: UserSchema,
-  is_channel: z.boolean().optional(),
-});
-
 const MessageCallbackSchema = z.object({
   update_type: z.literal('message_callback'),
   timestamp: z.number(),
@@ -73,8 +65,7 @@ const MessageCallbackSchema = z.object({
     .nullish(),
 });
 
-/** added / removed — бота добавили в групповой чат или убрали из него (чат дома в MAX). */
-export type EventType = 'message' | 'started' | 'callback' | 'added' | 'removed';
+export type EventType = 'message' | 'started' | 'callback';
 
 export interface ParsedUser {
   userId: string;
@@ -196,21 +187,6 @@ export function parseUpdate(raw: unknown): ParseResult {
           messageId: u.message?.body?.mid,
           timestamp: u.timestamp,
         },
-      };
-    }
-
-    case 'bot_added':
-    case 'bot_removed': {
-      const r = BotMembershipSchema.safeParse(raw);
-      if (!r.success) return { ok: false, reason: 'invalid', updateType, issues: issuesOf(r.error) };
-      const u = r.data;
-      // Каналы нам не нужны — только групповые чаты
-      if (u.is_channel) return { ok: false, reason: 'ignored', updateType };
-      const user = toUser(u.user);
-      const type = u.update_type === 'bot_added' ? 'added' : 'removed';
-      return {
-        ok: true,
-        event: { type, dedupKey: `${type}:${u.chat_id}:${u.timestamp}`, user, userId: user.userId, chatId: u.chat_id, chatType: 'chat', timestamp: u.timestamp },
       };
     }
 

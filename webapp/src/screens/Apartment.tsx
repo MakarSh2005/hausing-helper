@@ -3,7 +3,7 @@ import type { Apartment as Apt } from '../api';
 import { phoneHref } from '../format';
 import { Field, orgName } from '../ui';
 
-export function Apartment(props: { apartment: Apt | null; onChangeAddress: () => void; onJoinChat: (link: string) => void }) {
+export function Apartment(props: { apartment: Apt | null; onChangeAddress: () => void }) {
   const a = props.apartment;
   if (!a) {
     return (
@@ -83,23 +83,6 @@ export function Apartment(props: { apartment: Apt | null; onChangeAddress: () =>
         )}
         {uk?.working_hours && <Field label="Часы работы">{uk.working_hours}</Field>}
       </section>
-
-      {a.house_chat && (
-        <section className="card" aria-labelledby="house-chat-title">
-          <span className="field__label" id="house-chat-title">
-            Чат дома в MAX
-          </span>
-          <div className="field__value" style={{ fontWeight: 600, margin: '2px 0 4px' }}>
-            {a.house_chat.title ?? 'Чат соседей'}
-          </div>
-          <span className="field__label">Отключения, собрания, новости дома — вместе с соседями.</span>
-          <div style={{ marginTop: 12 }}>
-            <Button size="medium" stretched onClick={() => props.onJoinChat(a.house_chat!.link)}>
-              Открыть чат дома
-            </Button>
-          </div>
-        </section>
-      )}
 
       {!h.data_verified && <p className="note">Справочник домов работает в тестовом режиме.</p>}
       <div className="gutter">

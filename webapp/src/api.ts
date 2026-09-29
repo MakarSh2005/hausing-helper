@@ -24,8 +24,6 @@ export interface Apartment {
     data_verified: boolean;
   };
   uk: (Org & { rating: { avg: number; count: number } | null }) | null;
-  /** Чат дома в MAX (групповой чат, привязанный к дому ботом); null — чата нет. */
-  house_chat: { title: string | null; link: string; since: string } | null;
 }
 
 export type Status = 'created' | 'accepted' | 'in_progress' | 'completed' | 'rejected' | 'cancelled';
@@ -56,14 +54,12 @@ export interface RequestItem {
 
 export interface AppNotification {
   id: string;
-  kind: 'status' | 'neighbors' | 'house_chat';
+  kind: 'status' | 'neighbors';
   at: string;
   title: string;
   text: string;
   request_id: string | null;
   category: string | null;
-  /** Приглашение в чат дома в MAX. */
-  link: string | null;
 }
 
 export type AuthProblem = 'no_launch_data' | 'expired' | 'rejected';
@@ -303,7 +299,6 @@ export type SupportAction =
   | { type: 'open_request'; label: string; id: string }
   | { type: 'address'; label: string }
   | { type: 'call'; label: string; phone: string }
-  | { type: 'link'; label: string; url: string }
   | { type: 'tab'; label: string; tab: 'apartment' | 'requests' | 'notifications' };
 export interface SupportAnswer {
   topic: string;
