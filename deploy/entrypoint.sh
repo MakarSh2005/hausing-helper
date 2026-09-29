@@ -18,7 +18,8 @@ echo "entrypoint: применяю миграции"
 ./node_modules/.bin/prisma migrate deploy
 
 echo "entrypoint: заполняю справочники"
-node dist/prisma/seed.js
+# Ошибка справочника не должна останавливать бота: он запустится с тем, что уже есть в базе
+node dist/prisma/seed.js || echo "entrypoint: ОШИБКА seed — бот запускается с прежними справочниками, см. сообщение выше" >&2
 
 echo "entrypoint: проверяю сеть до MAX"
 node /usr/local/lib/netcheck.mjs || true

@@ -9,6 +9,7 @@
  * 2. РСО, региональный оператор ТКО, муниципальные службы, фонд капремонта, ГЖИ — синтетические (демо).
  * 3. Правила маршрутизации категорий (responsible_orgs) — из src/domain/norms.ts, со ссылками на нормативы.
  */
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { Prisma, PrismaClient } from '@prisma/client';
@@ -40,6 +41,26 @@ interface HousesFile {
   }>;
 }
 
+/** Меняется, когда меняется сама логика загрузки домов — тогда seed перепишет справочник заново. */
+const SEED_VERSION = 'houses-v2';
+// Отметка об удачной загрузке лежит рядом с базой (постоянный том): удалили базу — удалится и отметка.
+const MARK_FILE = path.join(process.env.DATA_DIR || path.resolve(process.cwd(), 'data'), '.seed-houses');
+function readSeedMark(): string | null {
+  try {
+    return fs.readFileSync(MARK_FILE, 'utf8').trim();
+  } catch {
+    return null;
+  }
+}
+function writeSeedMark(hash: string) {
+  try {
+    fs.mkdirSync(path.dirname(MARK_FILE), { recursive: true });
+    fs.writeFileSync(MARK_FILE, hash);
+  } catch (e) {
+    console.warn(`seed: не удалось записать отметку ${MARK_FILE}: ${(e as Error).message}`);
+  }
+}
+
 /** «25.09.2026» → Date; пусто или мусор → null. */
 function parseRuDate(s: string): Date | null {
   const m = /^(\d{2})\.(\d{2})\.(\d{4})$/.exec(s.trim());
@@ -51,9 +72,17 @@ async function seedHouses() {
   if (!fs.existsSync(DATA_FILE)) {
     // Не роняем запуск: бот должен оставаться доступным, даже если справочник не доехал до сервера.
     console.error(`seed: ОШИБКА — нет файла справочника ${DATA_FILE}. Дома не загружены, онбординг найдёт только уже имеющиеся в базе.`);
-    return { houses: 0, orgs: 0, unverifiedOrgs: 0, housesRemoved: 0, housesKept: 0, orgsRemoved: 0 };
+    return { houses: 0, orgs: 0, unverifiedOrgs: 0, housesRemoved: 0, housesKept: 0, orgsRemoved: 0, skipped: false };
   }
-  const data = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8')) as HousesFile;
+  const raw = fs.readFileSync(DATA_FILE, 'utf8');
+  // Справочник не менялся с прошлого удачного seed — дома не переписываем: 4 тыс. записей — это
+  // полторы минуты на каждом рестарте, и всё это время бот недоступен.
+  const hash = crypto.createHash('sha256').update(SEED_VERSION).update(raw).digest('hex');
+  if (readSeedMark() === hash) {
+    console.log('seed: справочник домов не изменился — пропускаю');
+    return { houses: 0, orgs: 0, unverifiedOrgs: 0, housesRemoved: 0, housesKept: 0, orgsRemoved: 0, skipped: true };
+  }
+  const data = JSON.parse(raw) as HousesFile;
   const actualAt = parseRuDate(data.actualAt);
   const orgIdByInn = new Map<string, string>();
   let unverifiedOrgs = 0;
@@ -90,7 +119,8 @@ async function seedHouses() {
     );
   }
   const removed = await removeStale(new Set(data.houses.map((h) => h.code)), new Set(data.organizations.map((o) => o.inn)));
-  return { houses: data.houses.length, orgs: data.organizations.length, unverifiedOrgs, ...removed };
+  writeSeedMark(hash);
+  return { houses: data.houses.length, orgs: data.organizations.length, unverifiedOrgs, ...removed, skipped: false };
 
   async function upsertHouse(tx: Prisma.TransactionClient, h: HousesFile['houses'][number]) {
     const managerId = orgIdByInn.get(h.managerInn) ?? null;
@@ -133,10 +163,12 @@ async function seedHouses() {
 async function removeStale(codes: Set<string>, inns: Set<string>) {
   let housesRemoved = 0;
   let housesKept = 0;
-  const stale = await db.house.findMany({
-    where: { code: { notIn: [...codes] } },
-    select: { id: true, _count: { select: { apartments: true, requests: true } } },
+  // Список кодов не передаём в запрос: 4 тыс. значений в NOT IN превышают лимит параметров SQLite
+  // (Prisma P2029). Домов немного — отбираем устаревшие в памяти.
+  const all = await db.house.findMany({
+    select: { id: true, code: true, _count: { select: { apartments: true, requests: true } } },
   });
+  const stale = all.filter((h) => !codes.has(h.code));
   for (const h of stale) {
     if (h._count.apartments === 0 && h._count.requests === 0) {
       await db.house.delete({ where: { id: h.id } });
@@ -144,10 +176,12 @@ async function removeStale(codes: Set<string>, inns: Set<string>) {
     } else housesKept++;
   }
   let orgsRemoved = 0;
-  const staleOrgs = await db.organization.findMany({
-    where: { type: 'UK', OR: [{ inn: null }, { inn: { notIn: [...inns] } }] },
-    select: { id: true, _count: { select: { managedHouses: true, requests: true } } },
-  });
+  const staleOrgs = (
+    await db.organization.findMany({
+      where: { type: 'UK' },
+      select: { id: true, inn: true, _count: { select: { managedHouses: true, requests: true } } },
+    })
+  ).filter((o) => !o.inn || !inns.has(o.inn));
   for (const o of staleOrgs) {
     if (o._count.managedHouses === 0 && o._count.requests === 0) {
       await db.organization.delete({ where: { id: o.id } });
