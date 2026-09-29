@@ -35,7 +35,6 @@ const EnvSchema = z.object({
   MAX_API_URL: z.url().default('https://platform-api2.max.ru'),
   /** Сертификаты УЦ Минцифры для TLS к MAX (см. certs/README.md); none — отключить. */
   MAX_CA_FILE: z.string().optional(),
-  MAX_APP_URL: z.url().optional(),
   /**
    * Как бот открывает мини-приложение: open_app — кнопкой MAX (нужна привязка адреса к боту
    * на платформе MAX), link — ссылкой со входом (откроется в браузере).
@@ -58,7 +57,6 @@ const EnvSchema = z.object({
   MOCK_AUTO_STATUS_CHANGE: bool,
   /** Демо: напоминание о заявке через N минут вместо нормативного срока (сам срок в заявке не меняется). */
   DEMO_DUE_MINUTES: z.coerce.number().int().min(1).max(1440).optional(),
-  DEMO_ADMIN_TOKEN: z.string().min(16).optional(),
   /** Лимит вебхука на одного user_id за минуту (ТЗ 9.2). */
   WEBHOOK_RATE_LIMIT_PER_MIN: z.coerce.number().int().positive().default(100),
 });

@@ -11,8 +11,10 @@ services:
     build: .
     env_file: .env
     environment:
-      # Путь внутри тома — иначе БД теряется при пересоздании контейнера (ТЗ 9.3).
+      # Пути внутри тома — иначе база и фото заявок теряются при пересоздании контейнера (ТЗ 9.3).
+      # Задаются здесь, а не в .env: значения из .env (для запуска без Docker) их не перебьют.
       DATABASE_URL: file:/data/app.db
+      DATA_DIR: /data
       PORT: "3000"
       NODE_ENV: production
     volumes:

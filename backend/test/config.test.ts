@@ -19,9 +19,10 @@ describe('loadConfig', () => {
   });
 
   it('пустые строки из .env.example = «не задано»', () => {
-    const c = loadConfig({ ...base, SESSION_JWT_SECRET: '', DEMO_ADMIN_TOKEN: '', MAX_APP_URL: '' });
+    const c = loadConfig({ ...base, SESSION_JWT_SECRET: '', DEMO_DUE_MINUTES: '', PUBLIC_BASE_URL: '' });
     assert.equal(c.SESSION_JWT_SECRET, undefined);
-    assert.equal(c.MAX_APP_URL, undefined);
+    assert.equal(c.DEMO_DUE_MINUTES, undefined);
+    assert.equal(c.PUBLIC_BASE_URL, undefined);
   });
 
   it('без токена — ошибка, в тексте нет значений секретов', () => {
