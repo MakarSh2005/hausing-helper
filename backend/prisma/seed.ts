@@ -11,7 +11,7 @@
  */
 import fs from 'node:fs';
 import path from 'node:path';
-import { PrismaClient } from '@prisma/client';
+import { Prisma, PrismaClient } from '@prisma/client';
 import { houseKey } from '../src/domain/address.js';
 import { isValidOrgInn } from '../src/domain/inn.js';
 import { CATEGORY_ORDER, NORMS } from '../src/domain/norms.js';
@@ -30,6 +30,8 @@ interface HousesFile {
   organizations: Array<{
     inn: string; name: string; phone: string; dispatcherPhone: string; address: string;
     email: string; website: string; workingHours: string; licenseNumber: string;
+    /** false — эту УК не удалось подтвердить: «данные уточняются», даже если справочник в целом проверен */
+    verified?: boolean;
   }>;
   houses: Array<{
     code: string; street: string; houseNumber: string; building: string; district: string;
@@ -57,7 +59,7 @@ async function seedHouses() {
   let unverifiedOrgs = 0;
 
   for (const o of data.organizations) {
-    const trusted = data.verified && isValidOrgInn(o.inn);
+    const trusted = data.verified && o.verified !== false && isValidOrgInn(o.inn);
     if (!trusted) unverifiedOrgs++;
     const fields = {
       type: 'UK',
@@ -77,7 +79,20 @@ async function seedHouses() {
     orgIdByInn.set(o.inn, org.id);
   }
 
-  for (const h of data.houses) {
+  // ~4 тыс. домов: пишем пачками в транзакциях — по одной записи на диск SQLite это минуты на каждом старте
+  const BATCH = 500;
+  for (let i = 0; i < data.houses.length; i += BATCH) {
+    await db.$transaction(
+      async (tx) => {
+        for (const h of data.houses.slice(i, i + BATCH)) await upsertHouse(tx, h);
+      },
+      { maxWait: 20_000, timeout: 120_000 },
+    );
+  }
+  const removed = await removeStale(new Set(data.houses.map((h) => h.code)), new Set(data.organizations.map((o) => o.inn)));
+  return { houses: data.houses.length, orgs: data.organizations.length, unverifiedOrgs, ...removed };
+
+  async function upsertHouse(tx: Prisma.TransactionClient, h: HousesFile['houses'][number]) {
     const managerId = orgIdByInn.get(h.managerInn) ?? null;
     const building = orNull(h.building);
     const fields = {
@@ -99,14 +114,16 @@ async function seedHouses() {
     };
     // Тот же адрес уже есть под другим кодом (например, демо-дом первой версии, к которому
     // успели привязаться) — переименовываем код, а не создаём дубль с тем же ключом адреса.
-    const sameAddress = await db.house.findUnique({ where: { normalizedKey: fields.normalizedKey } });
+    const sameAddress = await tx.house.findUnique({ where: { normalizedKey: fields.normalizedKey } });
     if (sameAddress && sameAddress.code !== h.code) {
-      await db.house.update({ where: { id: sameAddress.id }, data: { code: h.code } });
+      // Код, который мы хотим дать, может быть занят другим домом — его запись ниже по файлу
+      // — отодвигаем его на временный код: если он есть в файле, получит свой код дальше, если нет — уйдёт в removeStale
+      const holder = await tx.house.findUnique({ where: { code: h.code } });
+      if (holder) await tx.house.update({ where: { id: holder.id }, data: { code: `${h.code}_moved_${holder.id}` } });
+      await tx.house.update({ where: { id: sameAddress.id }, data: { code: h.code } });
     }
-    await db.house.upsert({ where: { code: h.code }, update: fields, create: { code: h.code, ...fields } });
+    await tx.house.upsert({ where: { code: h.code }, update: fields, create: { code: h.code, ...fields } });
   }
-  const removed = await removeStale(new Set(data.houses.map((h) => h.code)), new Set(data.organizations.map((o) => o.inn)));
-  return { houses: data.houses.length, orgs: data.organizations.length, unverifiedOrgs, ...removed };
 }
 
 /**

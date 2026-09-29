@@ -5,12 +5,15 @@
 
 const STREET_TYPES = new Set([
   'ул', 'улица', 'пр', 'пр-т', 'пркт', 'проспект', 'пер', 'переулок', 'б-р', 'бульвар', 'ш', 'шоссе',
-  'пл', 'площадь', 'наб', 'набережная', 'проезд', 'тракт', 'им', 'имени',
+  'пл', 'площадь', 'наб', 'набережная', 'проезд', 'тракт', 'им', 'имени', 'пр-кт', 'тер', 'территория',
+  'мкр', 'микрорайон',
 ]);
 // В JS \b понимает только латиницу — для кириллицы границы слова задаём явно.
 const L = '(?<![а-яa-z0-9])';
 const R = '(?![а-яa-z0-9])';
-const CITY_WORDS = new RegExp(`${L}(г|город|казань|рт|республика|татарстан|россия|рф)${R}`, 'g');
+const CITY_WORDS = new RegExp(`${L}(г|город|казань|рт|республика|россия|рф)${R}`, 'g');
+// «Татарстан» — и регион, и улица в Казани (ул. Татарстан): убираем, только если остаётся что-то ещё
+const TATARSTAN = new RegExp(`${L}татарстан${R}`, 'g');
 const APARTMENT = new RegExp(`${L}(?:кв|квартира)\\s*(\\d{1,4}[а-я]?)${R}`);
 const BUILDING = new RegExp(`${L}(?:корпус|корп|к)\\s*(\\d{1,3})${R}`);
 const HOUSE_WORD = new RegExp(`${L}(?:дом|д)${R}`, 'g');
@@ -87,7 +90,10 @@ export function parseAddressQuery(input: string): AddressQuery {
     streetPart = (t.slice(0, last.index) + ' ' + t.slice(last.index + last.len)).trim();
   }
   streetPart = streetPart.replace(HOUSE_WORD, ' ');
-  return { street: normalizeStreet(streetPart), houseNumber, building, apartment, ...(fraction ? { fraction } : {}) };
+  let street = normalizeStreet(streetPart);
+  const withoutRegion = street.replace(TATARSTAN, ' ').replace(/\s+/g, ' ').trim();
+  if (withoutRegion) street = withoutRegion;
+  return { street, houseNumber, building, apartment, ...(fraction ? { fraction } : {}) };
 }
 
 const numKey = (n: string) => n.toLowerCase().replace(/ё/g, 'е').replace(/\s/g, '');
@@ -112,7 +118,8 @@ export function levenshtein(a: string, b: string): number {
 export function streetSimilarity(query: string, street: string): number {
   if (!query || !street) return 0;
   if (query === street) return 1;
-  if (query.length >= 4 && (street.includes(query) || query.includes(street))) return 0.92;
+  // Вхождение — только с начала слова: «кирова» не должно совпадать с «шакирова»
+  if (query.length >= 4 && (` ${street}`.includes(` ${query}`) || ` ${query}`.includes(` ${street}`))) return 0.92;
   const qt = query.split(' ').filter((x) => x.length >= 4);
   const st = street.split(' ').filter((x) => x.length >= 4);
   let token = 0;
@@ -148,27 +155,37 @@ export function matchHouse<H extends HouseRef>(input: string, houses: H[]): Hous
   const query = parseAddressQuery(input);
   if (!query.street) return { kind: 'not_found', query };
 
-  // Лучшая улица (при равенстве — первая по алфавиту, чтобы ответ был стабильным)
-  const streets = [...new Set(houses.map((h) => h.street))].sort();
-  let best: { street: string; score: number } | undefined;
-  for (const s of streets) {
-    const score = streetSimilarity(query.street, normalizeStreet(s));
-    if (!best || score > best.score) best = { street: s, score };
+  // Улицы по похожести (при равенстве — по алфавиту, чтобы ответ был стабильным)
+  const streets = [...new Set(houses.map((h) => h.street))]
+    .sort()
+    .map((s) => ({ street: s, score: streetSimilarity(query.street, normalizeStreet(s)) }))
+    .filter((x) => x.score >= STREET_THRESHOLD)
+    .sort((a, b) => b.score - a.score);
+  const best = streets[0];
+  if (!best) return { kind: 'not_found', query };
+
+  const byStreet = (street: string) =>
+    houses
+      .filter((h) => h.street === street)
+      .sort((a, b) => parseInt(a.houseNumber, 10) - parseInt(b.houseNumber, 10) || a.houseNumber.localeCompare(b.houseNumber));
+  if (!query.houseNumber) return { kind: 'need_number', street: best.street, houses: byStreet(best.street), query };
+
+  // Почти одинаково похожие улицы («Мира» — и улица, и проспект) — берём ту, где есть такой дом
+  for (const cand of streets.filter((x) => x.score >= best.score - 0.05)) {
+    const found = findOnStreet(byStreet(cand.street), query);
+    if (found) return found;
   }
-  if (!best || best.score < STREET_THRESHOLD) return { kind: 'not_found', query };
+  return { kind: 'no_number', street: best.street, houses: byStreet(best.street), query };
+}
 
-  const onStreet = houses
-    .filter((h) => h.street === best!.street)
-    .sort((a, b) => parseInt(a.houseNumber, 10) - parseInt(b.houseNumber, 10) || a.houseNumber.localeCompare(b.houseNumber));
-  if (!query.houseNumber) return { kind: 'need_number', street: best.street, houses: onStreet, query };
-
+function findOnStreet<H extends HouseRef>(onStreet: H[], query: AddressQuery): HouseMatch<H> | null {
   // 1) «13/6» — угловой дом с таким номером целиком
   if (query.fraction) {
     const whole = onStreet.filter((h) => numKey(h.houseNumber) === numKey(query.fraction!));
     if (whole.length) return { kind: 'found', houses: whole, query: { ...query, building: undefined } };
   }
   // 2) номер + корпус
-  const num = numKey(query.houseNumber);
+  const num = numKey(query.houseNumber!);
   let found = onStreet.filter((h) => numKey(h.houseNumber) === num);
   if (query.building) {
     const exact = found.filter((h) => (h.building ?? '') === query.building);
@@ -178,7 +195,7 @@ export function matchHouse<H extends HouseRef>(input: string, houses: H[]): Hous
   // 3) написали «13», а в справочнике угловой «13/6» — это тот же дом
   const corner = onStreet.filter((h) => numKey(h.houseNumber).startsWith(`${num}/`));
   if (corner.length) return { kind: 'found', houses: corner, query };
-  return { kind: 'no_number', street: best.street, houses: onStreet, query };
+  return null;
 }
 
 export function formatAddress(h: { street: string; houseNumber: string; building?: string | null }): string {
